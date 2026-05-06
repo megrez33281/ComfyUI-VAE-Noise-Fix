@@ -1,12 +1,20 @@
 """
 ComfyUI Custom Node: VAE High-Frequency Noise Auto-Detection and Repair
 
-Detects and inpaints isolated high-frequency artifacts produced by SDXL VAE
-decoding, using a lightweight traditional computer vision pipeline:
-Laplacian gradient extraction → Connected Component Analysis → Neighborhood
-variance verification → Telea (Fast Marching Method) inpainting.
+A high-performance, Zero-NN (Zero Neural Network) post-processing node designed 
+to autonomously detect and repair isolated high-frequency artifacts (fireflies) 
+produced during SDXL VAE decoding. 
 
-Architecture follows SOLID principles with explicit GPU/CPU transfer boundaries.
+The pipeline utilizes a lightweight traditional computer vision stack:
+1. Dual-Path Detection: Laplacian energy extraction ∪ Median filter residual.
+2. Geometric Filtering: Connected Component Analysis (CCA) for area thresholding.
+3. CIE-LAB Verification: Chromaticity vs. Luminance variance check to preserve 
+   natural highlights (stars, specular reflections).
+4. Boundary expansion: Morphological mask dilation for edge coverage.
+5. Reconstruction: Telea (Fast Marching Method) inpainting for seamless repair.
+
+Architecture adheres to SOLID principles, optimized for batched [B, H, W, C] 
+tensors with explicit GPU/CPU memory boundary management.
 """
 
 from __future__ import annotations
@@ -78,16 +86,25 @@ class TensorBridge:
 # ---------------------------------------------------------------------------
 
 class GradientNoiseDetector:
-    """Identifies isolated high-frequency artifacts via a three-stage pipeline:
+    """Identifies isolated high-frequency artifacts via a multi-stage pipeline:
 
-    1. Laplacian energy extraction on perceptual luminance.
-    2. Binary thresholding + Connected Component Area filtering (CCA).
-    3. Neighbourhood colour-variance verification to reject natural highlights.
+    1. Dual-path candidate detection:
+       a) Laplacian energy extraction on perceptual luminance.
+       b) Median filter residual to catch impulse noise missed by gradients.
+       Candidates from both paths are merged (union).
+    2. Connected Component Area filtering (CCA).
+    3. LAB chromaticity-based neighbourhood verification:
+       separates genuine noise (chromatic aberration) from natural
+       highlights and specular reflections (luminance-only shift).
+    4. Optional mask dilation for full boundary coverage.
     """
 
     # Laplacian kernel depth; CV_16S avoids uint8 overflow during convolution.
     _LAPLACIAN_DDEPTH: int = cv2.CV_16S
     _LAPLACIAN_KSIZE: int = 3
+
+    # Median filter kernel size (must be odd).
+    _MEDIAN_KSIZE: int = 3
 
     # 8-connectivity groups diagonally adjacent pixels as one component.
     _CCA_CONNECTIVITY: int = 8
@@ -98,11 +115,13 @@ class GradientNoiseDetector:
         max_noise_size: int,
         image_height: int,
         image_width: int,
+        mask_dilate: int = 0,
     ) -> None:
         self._gradient_sensitivity = gradient_sensitivity
         self._max_noise_size = max_noise_size
         self._image_height = image_height
         self._image_width = image_width
+        self._mask_dilate = mask_dilate
 
     # -- Public API ----------------------------------------------------------
 
@@ -110,22 +129,27 @@ class GradientNoiseDetector:
         """Return a binary mask ``[H, W]`` (uint8, 255 = noise) for one frame.
 
         Pipeline order:
-            Laplacian energy map → adaptive threshold → CCA area filter →
-            neighbourhood variance rejection.
+            (Laplacian energy ∪ Median residual) → CCA area filter →
+            LAB chromaticity verification → optional mask dilation.
         """
         gray: np.ndarray = TensorBridge.grayscale_rec709(bgr_u8)
-        energy_map: np.ndarray = self._compute_laplacian_energy(gray)
-        binary: np.ndarray = self._adaptive_threshold(energy_map)
-        area_filtered: np.ndarray = self._filter_by_area(binary)
-        variance_filtered: np.ndarray = self._filter_by_neighbourhood_variance(
+
+        # Dual-path candidate detection.
+        laplacian_candidates: np.ndarray = self._detect_laplacian(gray)
+        median_candidates: np.ndarray = self._detect_median_residual(bgr_u8)
+        combined: np.ndarray = cv2.bitwise_or(laplacian_candidates, median_candidates)
+
+        area_filtered: np.ndarray = self._filter_by_area(combined)
+        verified: np.ndarray = self._filter_by_lab_chromaticity(
             area_filtered, bgr_u8
         )
-        return variance_filtered
+        dilated: np.ndarray = self._dilate_mask(verified)
+        return dilated
 
-    # -- Stage 1: Laplacian energy -------------------------------------------
+    # -- Stage 1a: Laplacian energy ------------------------------------------
 
-    def _compute_laplacian_energy(self, gray: np.ndarray) -> np.ndarray:
-        """Apply Laplacian filter to extract high-frequency gradient energy.
+    def _detect_laplacian(self, gray: np.ndarray) -> np.ndarray:
+        """Laplacian energy → adaptive threshold → binary candidates.
 
         The absolute value of the 2nd-order derivative highlights regions with
         abrupt intensity transitions regardless of sign (bright-on-dark or
@@ -136,23 +160,43 @@ class GradientNoiseDetector:
             self._LAPLACIAN_DDEPTH,
             ksize=self._LAPLACIAN_KSIZE,
         )
-        return cv2.convertScaleAbs(laplacian_16s)
-
-    # -- Stage 2: Threshold + CCA area filter --------------------------------
-
-    def _adaptive_threshold(self, energy_map: np.ndarray) -> np.ndarray:
-        """Binarise the energy map using *gradient_sensitivity* as the cut-off.
-
-        ``gradient_sensitivity`` is expressed on a normalised [0, 1] scale and
-        mapped to the uint8 range [0, 255].  Lower values yield higher
-        sensitivity (more candidates); higher values restrict detection to only
-        the most extreme gradients.
-        """
+        energy_map: np.ndarray = cv2.convertScaleAbs(laplacian_16s)
         threshold_value: int = int(self._gradient_sensitivity * 255.0)
         _, binary = cv2.threshold(
             energy_map, threshold_value, 255, cv2.THRESH_BINARY
         )
         return binary
+
+    # -- Stage 1b: Median filter residual ------------------------------------
+
+    def _detect_median_residual(self, bgr_u8: np.ndarray) -> np.ndarray:
+        """Detect impulse noise by comparing the image to its median-filtered
+        version.
+
+        Median filtering is the canonical impulse-noise suppressor: it
+        replaces each pixel with the median of its local neighbourhood,
+        effectively erasing salt-and-pepper spikes while preserving edges.
+        The per-channel absolute difference between the original and the
+        median-filtered image isolates exactly these spikes.
+
+        The maximum residual across B, G, R channels is thresholded to
+        produce a binary candidate mask.  The threshold is derived from
+        *gradient_sensitivity* to stay consistent with the Laplacian path.
+        """
+        median_filtered: np.ndarray = cv2.medianBlur(bgr_u8, self._MEDIAN_KSIZE)
+
+        # Per-channel absolute difference → take max across channels.
+        diff: np.ndarray = cv2.absdiff(bgr_u8, median_filtered)
+        max_diff: np.ndarray = np.max(diff, axis=2)
+
+        # Threshold: lower sensitivity → lower threshold → catch more.
+        threshold_value: int = int(20 + self._gradient_sensitivity * 80.0)
+        _, binary = cv2.threshold(
+            max_diff, threshold_value, 255, cv2.THRESH_BINARY
+        )
+        return binary
+
+    # -- Stage 2: CCA area filter --------------------------------------------
 
     def _filter_by_area(self, binary: np.ndarray) -> np.ndarray:
         """Discard connected components whose pixel area exceeds *max_noise_size*.
@@ -172,39 +216,47 @@ class GradientNoiseDetector:
 
         return mask
 
-    # -- Stage 3: Neighbourhood colour-variance verification -----------------
+    # -- Stage 3: LAB chromaticity verification ------------------------------
 
-    def _filter_by_neighbourhood_variance(
+    def _filter_by_lab_chromaticity(
         self,
         candidate_mask: np.ndarray,
         bgr_u8: np.ndarray,
     ) -> np.ndarray:
-        """Reject candidates that exhibit smooth gradient transitions typical
-        of natural highlights (stars, specular reflections).
+        """Reject candidates whose chromaticity matches their neighbourhood,
+        indicating a natural highlight or specular reflection rather than
+        VAE noise.
 
-        For each connected component, compare the mean colour of its pixels
-        against the mean colour of its surrounding annular neighbourhood.
-        Noise pixels produce a large Euclidean colour distance (impulse-like),
-        whereas natural bright features show gradual falloff.
+        The verification operates in CIE-LAB colour space.  Channel L*
+        encodes lightness; channels a* and b* encode chromaticity.  By
+        measuring distance in the a*b* plane only, the test becomes
+        invariant to brightness differences:
 
-        The dynamic rejection threshold is derived from *gradient_sensitivity*:
-        less sensitive settings require a larger colour jump to qualify as noise.
+        - **Noise**: chromatic aberration → high a*b* distance from neighbours.
+        - **Reflection**: same hue, just brighter → low a*b* distance.
+
+        A secondary luminance-spike check catches monochromatic impulse
+        noise (pure white/black spikes) that has near-zero chromaticity
+        shift but an extreme lightness jump.
         """
         num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
             candidate_mask, connectivity=self._CCA_CONNECTIVITY
         )
         verified_mask = np.zeros_like(candidate_mask)
 
-        # Neighbourhood ring width in pixels.  Adaptive to resolution so that
-        # the annulus always captures enough context.
+        # Neighbourhood ring width in pixels.
         ring_width: int = max(3, int(math.sqrt(self._max_noise_size)) + 2)
 
-        # Colour-distance threshold.  Mapped from sensitivity: higher
-        # sensitivity (lower gradient_sensitivity) → lower distance threshold.
-        colour_distance_threshold: float = 30.0 + self._gradient_sensitivity * 120.0
+        # Chromaticity distance threshold (a*b* plane).
+        # Lower sensitivity → lower threshold → catch more.
+        chroma_threshold: float = 3.0 + self._gradient_sensitivity * 20.0
+
+        # Luminance spike threshold (L* channel).
+        # Catches pure white/black impulse noise with no chromatic shift.
+        luma_spike_threshold: float = 25.0 + self._gradient_sensitivity * 40.0
 
         h, w = candidate_mask.shape[:2]
-        bgr_f32: np.ndarray = bgr_u8.astype(np.float32)
+        lab_f32: np.ndarray = cv2.cvtColor(bgr_u8, cv2.COLOR_BGR2LAB).astype(np.float32)
 
         for label_id in range(1, num_labels):
             x0: int = stats[label_id, cv2.CC_STAT_LEFT]
@@ -212,14 +264,14 @@ class GradientNoiseDetector:
             bw: int = stats[label_id, cv2.CC_STAT_WIDTH]
             bh: int = stats[label_id, cv2.CC_STAT_HEIGHT]
 
-            # Compute bounding box for the surrounding annular region.
+            # Bounding box for the surrounding annular region.
             rx0 = max(0, x0 - ring_width)
             ry0 = max(0, y0 - ring_width)
             rx1 = min(w, x0 + bw + ring_width)
             ry1 = min(h, y0 + bh + ring_width)
 
             roi_labels = labels[ry0:ry1, rx0:rx1]
-            roi_bgr = bgr_f32[ry0:ry1, rx0:rx1]
+            roi_lab = lab_f32[ry0:ry1, rx0:rx1]
 
             component_pixels = roi_labels == label_id
             neighbourhood_pixels = ~component_pixels
@@ -227,16 +279,45 @@ class GradientNoiseDetector:
             if not np.any(neighbourhood_pixels):
                 continue
 
-            mean_component: np.ndarray = roi_bgr[component_pixels].mean(axis=0)
-            mean_neighbour: np.ndarray = roi_bgr[neighbourhood_pixels].mean(axis=0)
+            mean_comp: np.ndarray = roi_lab[component_pixels].mean(axis=0)
+            mean_neigh: np.ndarray = roi_lab[neighbourhood_pixels].mean(axis=0)
 
-            # Euclidean distance in BGR colour space.
-            colour_dist: float = float(np.linalg.norm(mean_component - mean_neighbour))
+            # Chromaticity distance (a*b* channels only, ignoring L*).
+            chroma_dist: float = float(
+                np.linalg.norm(mean_comp[1:] - mean_neigh[1:])
+            )
 
-            if colour_dist >= colour_distance_threshold:
+            # Luminance difference (L* channel).
+            luma_diff: float = abs(float(mean_comp[0] - mean_neigh[0]))
+
+            # Accept if chromaticity deviates (colour noise) OR if
+            # luminance spikes extremely (monochromatic impulse noise).
+            if chroma_dist >= chroma_threshold or luma_diff >= luma_spike_threshold:
                 verified_mask[labels == label_id] = 255
 
         return verified_mask
+
+    # -- Stage 4: Mask dilation ------------------------------------------------
+
+    def _dilate_mask(self, mask: np.ndarray) -> np.ndarray:
+        """Expand detected noise regions by *mask_dilate* pixels.
+
+        Morphological dilation ensures the mask fully covers noise edges
+        that may fall below the Laplacian energy threshold.  This prevents
+        Telea inpainting from sampling corrupted boundary pixels as source
+        data during reconstruction.
+
+        A circular structuring element is used to produce isotropic growth
+        without favouring axis-aligned directions.
+        """
+        if self._mask_dilate <= 0:
+            return mask
+
+        diameter: int = 2 * self._mask_dilate + 1
+        kernel: np.ndarray = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (diameter, diameter)
+        )
+        return cv2.dilate(mask, kernel, iterations=1)
 
 
 # ---------------------------------------------------------------------------
@@ -355,6 +436,22 @@ class VAENoiseFixNode:
                         ),
                     },
                 ),
+                "mask_dilate": (
+                    "INT",
+                    {
+                        "default": 2,
+                        "min": 0,
+                        "max": 10,
+                        "step": 1,
+                        "display": "slider",
+                        "tooltip": (
+                            "Dilation radius (pixels) applied to the detected mask "
+                            "before inpainting. Expands each noise region so that "
+                            "boundary pixels are fully covered, preventing the "
+                            "inpainter from sampling corrupted edge data."
+                        ),
+                    },
+                ),
                 "preview_mask": (
                     "BOOLEAN",
                     {
@@ -378,6 +475,7 @@ class VAENoiseFixNode:
         image: torch.Tensor,
         gradient_sensitivity: float,
         max_noise_size: int,
+        mask_dilate: int,
         preview_mask: bool,
     ) -> Tuple[torch.Tensor]:
         """Entry point invoked by ComfyUI runtime.
@@ -393,7 +491,7 @@ class VAENoiseFixNode:
             frame_tensor: torch.Tensor = image[idx]  # [H, W, C]
             processed: torch.Tensor = self._process_single_frame(
                 frame_tensor, gradient_sensitivity, max_noise_size,
-                preview_mask, device,
+                mask_dilate, preview_mask, device,
             )
             results.append(processed)
 
@@ -407,6 +505,7 @@ class VAENoiseFixNode:
         frame: torch.Tensor,
         gradient_sensitivity: float,
         max_noise_size: int,
+        mask_dilate: int,
         preview_mask: bool,
         device: torch.device,
     ) -> torch.Tensor:
@@ -419,6 +518,7 @@ class VAENoiseFixNode:
             max_noise_size=max_noise_size,
             image_height=h,
             image_width=w,
+            mask_dilate=mask_dilate,
         )
         noise_mask: np.ndarray = detector.detect(bgr_u8)
 
