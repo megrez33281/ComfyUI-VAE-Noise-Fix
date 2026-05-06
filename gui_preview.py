@@ -298,8 +298,32 @@ class PreviewApp:
     """Interactive parameter tuning and preview application."""
 
     _WINDOW = "VAE Noise Fix - Preview"
-    _VIEW_NAMES = ["Original", "Mask Overlay", "Mask Only", "Repaired", "Side-by-Side"]
-    _SAVE_SUFFIXES = ["_original", "_mask_overlay", "_mask_only", "_fixed", "_compare"]
+    _VIEW_NAMES = [
+        "Original", 
+        "Mask Overlay", 
+        "Mask Only", 
+        "Repaired", 
+        "Side-by-Side",
+        "Laplacian Energy Map (Binary)",
+        "Median Residual Map (Binary)",
+        "Combined Seed Mask",
+        "Context Mask (Low Thresh)",
+        "Filtered Candidates (Shape/Iso)",
+        "Final Verified Mask (LAB)"
+    ]
+    _SAVE_SUFFIXES = [
+        "_original", 
+        "_mask_overlay", 
+        "_mask_only", 
+        "_fixed", 
+        "_compare",
+        "_laplacian",
+        "_median_residual",
+        "_seed",
+        "_context",
+        "_filtered",
+        "_final"
+    ]
 
     def __init__(self, image_paths: List[str]) -> None:
         self._paths = image_paths
@@ -324,6 +348,15 @@ class PreviewApp:
         self._mask_solo: Optional[np.ndarray] = None
         self._repaired: Optional[np.ndarray] = None
         self._stats: Optional[dict] = None
+        
+        # New cached intermediate maps
+        self._laplacian_map: Optional[np.ndarray] = None
+        self._median_map: Optional[np.ndarray] = None
+        self._seed_map: Optional[np.ndarray] = None
+        self._context_map: Optional[np.ndarray] = None
+        self._filtered_map: Optional[np.ndarray] = None
+        self._final_map: Optional[np.ndarray] = None
+        
         self._dirty = True
 
         # Last composed frame (before zoom lens) for saving.
@@ -374,6 +407,18 @@ class PreviewApp:
                 self._view_mode = 3
             elif key == ord("5"):
                 self._view_mode = 4
+            elif key == ord("6"):
+                self._view_mode = 5
+            elif key == ord("7"):
+                self._view_mode = 6
+            elif key == ord("8"):
+                self._view_mode = 7
+            elif key == ord("9"):
+                self._view_mode = 8
+            elif key == ord("0"):
+                self._view_mode = 9
+            elif key == ord("-"):
+                self._view_mode = 10
             elif key == ord("z"):
                 self._zoom_lens.toggle()
             elif key == ord("s"):
@@ -483,9 +528,46 @@ class PreviewApp:
         )
 
         t0 = time.perf_counter()
-        self._mask = detector.detect(self._bgr)
+        
+        # 1. Energy Computation
+        gray = TensorBridge.grayscale_rec709(self._bgr)
+        lap_energy = detector._compute_laplacian_energy(gray)
+        med_residual = detector._compute_median_residual(self._bgr)
+        
+        # 2. Seed & Context Mask Generation
+        seed_mask = detector._generate_binary_mask(lap_energy, med_residual, sensitivity)
+        
+        context_thresh = max(0.05, sensitivity * detector._CONTEXT_THRESHOLD_FACTOR)
+        context_mask = detector._generate_binary_mask(lap_energy, med_residual, context_thresh)
+        
+        # 3. Structural Filtering
+        filtered_mask = detector._filter_context_components(context_mask, seed_mask)
+        
+        # 4. LAB Chromaticity Verification
+        verified_mask = detector._filter_by_lab_chromaticity(
+            filtered_mask, self._bgr, detector._scaled_max_noise_size
+        )
+        
+        # 5. Dilation (Final Mask)
+        final_mask = detector._dilate_mask(verified_mask)
         elapsed_ms = (time.perf_counter() - t0) * 1000.0
 
+        # Cache masks for GUI display (convert to 3-channel for consistent rendering)
+        # For Laplacian and Median, we re-threshold here just to show the individual components
+        t_lap = int(sensitivity * 255.0)
+        _, b_lap = cv2.threshold(lap_energy, t_lap, 255, cv2.THRESH_BINARY)
+        t_med = int(20 + sensitivity * 80.0)
+        _, b_med = cv2.threshold(med_residual, t_med, 255, cv2.THRESH_BINARY)
+        
+        self._laplacian_map = cv2.cvtColor(b_lap, cv2.COLOR_GRAY2BGR)
+        self._median_map = cv2.cvtColor(b_med, cv2.COLOR_GRAY2BGR)
+        self._seed_map = cv2.cvtColor(seed_mask, cv2.COLOR_GRAY2BGR)
+        self._context_map = cv2.cvtColor(context_mask, cv2.COLOR_GRAY2BGR)
+        self._filtered_map = cv2.cvtColor(filtered_mask, cv2.COLOR_GRAY2BGR)
+        self._final_map = cv2.cvtColor(verified_mask, cv2.COLOR_GRAY2BGR) # Pre-dilation
+        
+        # Update core state
+        self._mask = final_mask
         self._overlay = DebugOverlayRenderer.render(self._bgr, self._mask)
         self._mask_solo = self._render_mask_solo(self._mask)
 
@@ -533,11 +615,24 @@ class PreviewApp:
             canvas = self._repaired.copy()
         elif self._view_mode == 4:
             canvas = self._make_side_by_side()
+        elif self._view_mode == 5:
+            canvas = self._laplacian_map.copy() if self._laplacian_map is not None else self._bgr.copy()
+        elif self._view_mode == 6:
+            canvas = self._median_map.copy() if self._median_map is not None else self._bgr.copy()
+        elif self._view_mode == 7:
+            canvas = self._seed_map.copy() if self._seed_map is not None else self._bgr.copy()
+        elif self._view_mode == 8:
+            canvas = self._context_map.copy() if self._context_map is not None else self._bgr.copy()
+        elif self._view_mode == 9:
+            canvas = self._filtered_map.copy() if self._filtered_map is not None else self._bgr.copy()
+        elif self._view_mode == 10:
+            canvas = self._final_map.copy() if self._final_map is not None else self._bgr.copy()
         else:
             canvas = self._bgr.copy()
 
         # Apply canvas zoom (crop + scale).
         canvas = self._canvas_zoom.apply(canvas)
+
 
         # HUD overlays.
         self._draw_top_bar(canvas)

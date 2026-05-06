@@ -88,26 +88,34 @@ class TensorBridge:
 class GradientNoiseDetector:
     """Identifies isolated high-frequency artifacts via a multi-stage pipeline:
 
-    1. Dual-path candidate detection:
-       a) Laplacian energy extraction on perceptual luminance.
-       b) Median filter residual to catch impulse noise missed by gradients.
-       Candidates from both paths are merged (union).
-    2. Connected Component Area filtering (CCA).
-    3. LAB chromaticity-based neighbourhood verification:
-       separates genuine noise (chromatic aberration) from natural
-       highlights and specular reflections (luminance-only shift).
-    4. Optional mask dilation for full boundary coverage.
+    1. Dual-threshold candidate extraction:
+       - Context Mask (Low Threshold): Captures the full extent of structures.
+       - Seed Mask (High Threshold): Identifies high-energy "spikes" (noise).
+    2. Structural & Isolation Filtering:
+       - Contextual Area: Rejects components that are part of larger structures.
+       - Shape Analysis: Rejects elongated structures (e.g., hair) via aspect ratio.
+       - Seed Verification: Ensures the component contains a high-energy peak.
+    3. LAB chromaticity-based neighbourhood verification.
+    4. Optional mask dilation.
     """
 
-    # Laplacian kernel depth; CV_16S avoids uint8 overflow during convolution.
+    # Laplacian kernel depth; CV_16S avoids uint8 overflow.
     _LAPLACIAN_DDEPTH: int = cv2.CV_16S
     _LAPLACIAN_KSIZE: int = 3
 
-    # Median filter kernel size (must be odd).
-    _MEDIAN_KSIZE: int = 3
+    # Fixed low threshold multiplier for context detection (sensitivity * multiplier).
+    # 0.25 allows capturing the "body" of structures even when sensitivity is high.
+    _CONTEXT_THRESHOLD_FACTOR: float = 0.25
 
-    # 8-connectivity groups diagonally adjacent pixels as one component.
+    # Maximum aspect ratio (max(w,h)/min(w,h)) to be considered noise.
+    # Higher values allow more elongated shapes; hair usually exceeds 3.0.
+    _MAX_ASPECT_RATIO: float = 3.0
+
+    # 8-connectivity for CCA.
     _CCA_CONNECTIVITY: int = 8
+
+    # Baseline resolution for max_noise_size (1024x1024 = 1 Megapixel)
+    _BASELINE_PIXELS: float = 1048576.0
 
     def __init__(
         self,
@@ -118,103 +126,157 @@ class GradientNoiseDetector:
         mask_dilate: int = 0,
     ) -> None:
         self._gradient_sensitivity = gradient_sensitivity
-        self._max_noise_size = max_noise_size
         self._image_height = image_height
         self._image_width = image_width
         self._mask_dilate = mask_dilate
 
+        # 1. Automatic Resolution Scaling
+        # The user's max_noise_size is treated as the ideal size at 1024x1024.
+        # We scale it proportionally to the actual image area.
+        current_pixels = float(image_height * image_width)
+        scale_factor = max(1.0, current_pixels / self._BASELINE_PIXELS)
+        
+        # We use math.ceil to ensure even small inputs (like 1 or 2) scale up 
+        # sufficiently at higher resolutions (e.g., 2K = 4x area).
+        self._scaled_max_noise_size = int(math.ceil(max_noise_size * scale_factor))
+
+        # 2. Dynamic Median Kernel
+        # Must be physically larger than the max noise blob to effectively erase it.
+        # Diameter = ceil(sqrt(area)).
+        noise_diameter = int(math.ceil(math.sqrt(self._scaled_max_noise_size)))
+        # Ensure it's an odd number and at least 5 (increased from 3 for better baseline suppression)
+        self._dynamic_median_ksize = max(5, (noise_diameter + 2) | 1)
+
     # -- Public API ----------------------------------------------------------
 
     def detect(self, bgr_u8: np.ndarray) -> np.ndarray:
-        """Return a binary mask ``[H, W]`` (uint8, 255 = noise) for one frame.
-
-        Pipeline order:
-            (Laplacian energy ∪ Median residual) → CCA area filter →
-            LAB chromaticity verification → optional mask dilation.
-        """
+        """Return a binary mask identifying isolated noise."""
         gray: np.ndarray = TensorBridge.grayscale_rec709(bgr_u8)
 
-        # Dual-path candidate detection.
-        laplacian_candidates: np.ndarray = self._detect_laplacian(gray)
-        median_candidates: np.ndarray = self._detect_median_residual(bgr_u8)
-        combined: np.ndarray = cv2.bitwise_or(laplacian_candidates, median_candidates)
+        # 1. Generate Energy Maps.
+        laplacian_energy: np.ndarray = self._compute_laplacian_energy(gray)
+        median_residual: np.ndarray = self._compute_median_residual(bgr_u8)
 
-        area_filtered: np.ndarray = self._filter_by_area(combined)
+        # 2. Extract Seed Mask (High Energy Peaks).
+        # Uses user-defined sensitivity.
+        seed_mask: np.ndarray = self._generate_binary_mask(
+            laplacian_energy, median_residual, self._gradient_sensitivity
+        )
+
+        # 3. Extract Context Mask (Full Structural Extent).
+        # Uses a lower threshold to see if "seeds" are part of a larger object.
+        context_threshold = max(0.05, self._gradient_sensitivity * self._CONTEXT_THRESHOLD_FACTOR)
+        context_mask: np.ndarray = self._generate_binary_mask(
+            laplacian_energy, median_residual, context_threshold
+        )
+
+        # 4. Filter Context Components by shape, isolation, and seed presence.
+        candidate_mask: np.ndarray = self._filter_context_components(
+            context_mask, seed_mask
+        )
+
+        # 5. LAB Chromaticity Verification.
+        # Pass the scaled max noise size for accurate neighbourhood ring calculation.
         verified: np.ndarray = self._filter_by_lab_chromaticity(
-            area_filtered, bgr_u8
+            candidate_mask, bgr_u8, self._scaled_max_noise_size
         )
-        dilated: np.ndarray = self._dilate_mask(verified)
-        return dilated
 
-    # -- Stage 1a: Laplacian energy ------------------------------------------
+        # 6. Optional dilation.
+        return self._dilate_mask(verified)
 
-    def _detect_laplacian(self, gray: np.ndarray) -> np.ndarray:
-        """Laplacian energy → adaptive threshold → binary candidates.
+    # -- Stage 1: Energy Computation -----------------------------------------
 
-        The absolute value of the 2nd-order derivative highlights regions with
-        abrupt intensity transitions regardless of sign (bright-on-dark or
-        dark-on-bright).
-        """
-        laplacian_16s: np.ndarray = cv2.Laplacian(
-            gray,
-            self._LAPLACIAN_DDEPTH,
-            ksize=self._LAPLACIAN_KSIZE,
-        )
-        energy_map: np.ndarray = cv2.convertScaleAbs(laplacian_16s)
-        threshold_value: int = int(self._gradient_sensitivity * 255.0)
-        _, binary = cv2.threshold(
-            energy_map, threshold_value, 255, cv2.THRESH_BINARY
-        )
-        return binary
+    def _compute_laplacian_energy(self, gray: np.ndarray) -> np.ndarray:
+        """Extract 2nd-order gradient energy."""
+        lap_16s = cv2.Laplacian(gray, self._LAPLACIAN_DDEPTH, ksize=self._LAPLACIAN_KSIZE)
+        return cv2.convertScaleAbs(lap_16s)
 
-    # -- Stage 1b: Median filter residual ------------------------------------
+    def _compute_median_residual(self, bgr_u8: np.ndarray) -> np.ndarray:
+        """Extract impulse noise residual using a dynamically sized kernel."""
+        median = cv2.medianBlur(bgr_u8, self._dynamic_median_ksize)
+        diff = cv2.absdiff(bgr_u8, median)
+        return np.max(diff, axis=2)
 
-    def _detect_median_residual(self, bgr_u8: np.ndarray) -> np.ndarray:
-        """Detect impulse noise by comparing the image to its median-filtered
-        version.
+    def _generate_binary_mask(
+        self,
+        laplacian_energy: np.ndarray,
+        median_residual: np.ndarray,
+        sensitivity: float
+    ) -> np.ndarray:
+        """Combine dual-path energy into a single binary mask at given sensitivity."""
+        # Laplacian path
+        t_lap = int(sensitivity * 255.0)
+        _, b_lap = cv2.threshold(laplacian_energy, t_lap, 255, cv2.THRESH_BINARY)
 
-        Median filtering is the canonical impulse-noise suppressor: it
-        replaces each pixel with the median of its local neighbourhood,
-        effectively erasing salt-and-pepper spikes while preserving edges.
-        The per-channel absolute difference between the original and the
-        median-filtered image isolates exactly these spikes.
+        # Median path (slightly higher base threshold to avoid floor noise)
+        t_med = int(20 + sensitivity * 80.0)
+        _, b_med = cv2.threshold(median_residual, t_med, 255, cv2.THRESH_BINARY)
 
-        The maximum residual across B, G, R channels is thresholded to
-        produce a binary candidate mask.  The threshold is derived from
-        *gradient_sensitivity* to stay consistent with the Laplacian path.
-        """
-        median_filtered: np.ndarray = cv2.medianBlur(bgr_u8, self._MEDIAN_KSIZE)
+        return cv2.bitwise_or(b_lap, b_med)
 
-        # Per-channel absolute difference → take max across channels.
-        diff: np.ndarray = cv2.absdiff(bgr_u8, median_filtered)
-        max_diff: np.ndarray = np.max(diff, axis=2)
+    # -- Stage 2: Structural Filtering ---------------------------------------
 
-        # Threshold: lower sensitivity → lower threshold → catch more.
-        threshold_value: int = int(20 + self._gradient_sensitivity * 80.0)
-        _, binary = cv2.threshold(
-            max_diff, threshold_value, 255, cv2.THRESH_BINARY
-        )
-        return binary
-
-    # -- Stage 2: CCA area filter --------------------------------------------
-
-    def _filter_by_area(self, binary: np.ndarray) -> np.ndarray:
-        """Discard connected components whose pixel area exceeds *max_noise_size*.
-
-        Components with area ≤ max_noise_size are retained as noise candidates.
-        """
+    def _filter_context_components(
+        self,
+        context_mask: np.ndarray,
+        seed_mask: np.ndarray
+    ) -> np.ndarray:
+        """Identify components in context_mask that represent isolated noise."""
         num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
-            binary, connectivity=self._CCA_CONNECTIVITY
+            context_mask, connectivity=self._CCA_CONNECTIVITY
         )
-        mask = np.zeros_like(binary)
+        output = np.zeros_like(context_mask)
 
-        # Label 0 is the background; skip it.
+        # Pre-compute absolute bounds to avoid math in the loop.
+        # Context area can be up to 5x the max noise size to allow for "halos"
+        # around the core noise spike, but we cap it at a minimum of 50 pixels
+        # to ensure small halos aren't prematurely rejected.
+        max_context_area = max(self._scaled_max_noise_size * 5, 50)
+
         for label_id in range(1, num_labels):
-            area: int = stats[label_id, cv2.CC_STAT_AREA]
-            if area <= self._max_noise_size:
-                mask[labels == label_id] = 255
+            context_area = stats[label_id, cv2.CC_STAT_AREA]
 
-        return mask
+            # Rule 1: Isolation Check (Context Area).
+            if context_area > max_context_area:
+                continue
+
+            # Rule 2: Seed Verification & Exact Core Size Check.
+            component_roi = (labels == label_id)
+            seed_pixels = seed_mask[component_roi]
+            seed_area = np.count_nonzero(seed_pixels)
+
+            # The actual high-energy "core" noise must exist AND be smaller than
+            # the user's requested limit (scaled for resolution).
+            if seed_area == 0 or seed_area > self._scaled_max_noise_size:
+                continue
+
+            # Rule 3: Intrinsic Shape Check (Compactness via minAreaRect).
+            # We calculate the rotated bounding box to find the TRUE aspect ratio,
+            # avoiding the AABB blind spot for diagonal lines (e.g., 45-degree hair).
+            # For tiny blobs (1-4 pixels), minAreaRect can be unstable or overkill,
+            # and they are inherently compact enough, so we skip the expensive check.
+            if context_area > 4:
+                # Find the (y, x) coordinates of all pixels in this component
+                # Note: np.where returns (y_coords, x_coords)
+                coords = np.column_stack(np.where(component_roi))
+                # OpenCV minAreaRect expects (x, y) coordinates
+                coords_xy = coords[:, ::-1]
+                
+                # minAreaRect returns (center(x, y), (width, height), angle of rotation)
+                _, (rect_w, rect_h), _ = cv2.minAreaRect(coords_xy.astype(np.float32))
+                
+                # Calculate true intrinsic aspect ratio
+                max_dim = max(rect_w, rect_h)
+                min_dim = max(1e-5, min(rect_w, rect_h)) # Prevent division by zero
+                intrinsic_aspect_ratio = max_dim / min_dim
+                
+                if intrinsic_aspect_ratio > self._MAX_ASPECT_RATIO:
+                    continue
+
+            # If it passes all tests, we output the ENTIRE context blob.
+            output[component_roi] = 255
+
+        return output
 
     # -- Stage 3: LAB chromaticity verification ------------------------------
 
@@ -222,38 +284,29 @@ class GradientNoiseDetector:
         self,
         candidate_mask: np.ndarray,
         bgr_u8: np.ndarray,
+        effective_noise_size: int,
     ) -> np.ndarray:
         """Reject candidates whose chromaticity matches their neighbourhood,
         indicating a natural highlight or specular reflection rather than
         VAE noise.
 
-        The verification operates in CIE-LAB colour space.  Channel L*
-        encodes lightness; channels a* and b* encode chromaticity.  By
-        measuring distance in the a*b* plane only, the test becomes
-        invariant to brightness differences:
-
-        - **Noise**: chromatic aberration → high a*b* distance from neighbours.
-        - **Reflection**: same hue, just brighter → low a*b* distance.
-
-        A secondary luminance-spike check catches monochromatic impulse
-        noise (pure white/black spikes) that has near-zero chromaticity
-        shift but an extreme lightness jump.
+        This uses a relative contrast (steepness) approach for luminance.
+        It checks if the component's internal mean drops severely from its peak 
+        relative to the background, forming a "cliff" (impulse noise) rather 
+        than a smooth "hill" (star).
         """
         num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
             candidate_mask, connectivity=self._CCA_CONNECTIVITY
         )
         verified_mask = np.zeros_like(candidate_mask)
 
-        # Neighbourhood ring width in pixels.
-        ring_width: int = max(3, int(math.sqrt(self._max_noise_size)) + 2)
+        # Neighbourhood ring width in pixels, using the effective (scaled) noise size.
+        ring_width: int = max(3, int(math.sqrt(effective_noise_size)) + 2)
 
         # Chromaticity distance threshold (a*b* plane).
-        # Lower sensitivity → lower threshold → catch more.
-        chroma_threshold: float = 3.0 + self._gradient_sensitivity * 20.0
-
-        # Luminance spike threshold (L* channel).
-        # Catches pure white/black impulse noise with no chromatic shift.
-        luma_spike_threshold: float = 25.0 + self._gradient_sensitivity * 40.0
+        # We still keep this to catch pure color bleeds (e.g. purple/green fireflies)
+        # that might not have a huge luminance cliff.
+        chroma_threshold: float = 3.0 + self._gradient_sensitivity * 15.0
 
         h, w = candidate_mask.shape[:2]
         lab_f32: np.ndarray = cv2.cvtColor(bgr_u8, cv2.COLOR_BGR2LAB).astype(np.float32)
@@ -279,20 +332,39 @@ class GradientNoiseDetector:
             if not np.any(neighbourhood_pixels):
                 continue
 
-            mean_comp: np.ndarray = roi_lab[component_pixels].mean(axis=0)
-            mean_neigh: np.ndarray = roi_lab[neighbourhood_pixels].mean(axis=0)
+            # 1. Analyze the internal structure of the candidate (L* channel)
+            comp_luma = roi_lab[component_pixels, 0]
+            peak_luma = np.max(comp_luma)
+            mean_comp_luma = np.mean(comp_luma)
 
-            # Chromaticity distance (a*b* channels only, ignoring L*).
-            chroma_dist: float = float(
-                np.linalg.norm(mean_comp[1:] - mean_neigh[1:])
-            )
+            # 2. Analyze the background (L* channel)
+            mean_bg_lab = roi_lab[neighbourhood_pixels].mean(axis=0)
+            mean_bg_luma = mean_bg_lab[0]
 
-            # Luminance difference (L* channel).
-            luma_diff: float = abs(float(mean_comp[0] - mean_neigh[0]))
+            # --- Check 1: Steepness of the Cliff (Relative Contrast) ---
+            total_drop = peak_luma - mean_bg_luma
+            
+            # If there's barely any contrast with the background, it's not noise.
+            if total_drop <= 5.0:
+                continue
 
-            # Accept if chromaticity deviates (colour noise) OR if
-            # luminance spikes extremely (monochromatic impulse noise).
-            if chroma_dist >= chroma_threshold or luma_diff >= luma_spike_threshold:
+            # How much does the internal mean drop compared to the peak?
+            # Ratio near 1.0 = steep cliff (noise). Ratio near 0.5 = smooth hill (star).
+            internal_drop_ratio = (peak_luma - mean_comp_luma) / total_drop
+            
+            # Sensitivity adjusts how steep the cliff needs to be.
+            # E.g., sens 0.35 -> threshold 0.53. Requires a fairly steep drop.
+            cliff_threshold = 0.6 - (self._gradient_sensitivity * 0.2)
+            
+            is_cliff = internal_drop_ratio > cliff_threshold
+
+            # --- Check 2: Chromatic Aberration (Color Shift) ---
+            mean_comp_chroma = roi_lab[component_pixels, 1:].mean(axis=0)
+            chroma_dist = float(np.linalg.norm(mean_comp_chroma - mean_bg_lab[1:]))
+            is_chromatic_noise = chroma_dist >= chroma_threshold
+
+            # Accept if it's a steep cliff OR exhibits severe color bleed.
+            if is_cliff or is_chromatic_noise:
                 verified_mask[labels == label_id] = 255
 
         return verified_mask
