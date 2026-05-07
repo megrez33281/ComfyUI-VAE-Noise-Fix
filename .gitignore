@@ -18,3 +18,5 @@ Thumbs.db
 
 # Test outputs (generated, not source)
 test_output/
+
+.env
