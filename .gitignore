@@ -20,3 +20,5 @@ Thumbs.db
 test_output/
 
 .env
+*.mp3
+*.mp4
