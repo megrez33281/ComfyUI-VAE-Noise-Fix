@@ -1,9 +1,0 @@
-1. 專案目標與動機 (2 mins)：
-	展示 SDXL VAE 的「螢火蟲」瑕疵，概略講述原因、點出這是一個微觀的破壞。
-2. Related Work 核心探討 (6~7 mins)：
-       * (2 mins) 講 RePaint (CVPR'22)：這是現在大家的作法，但太重、太耗顯存。
-       * (2 mins) 講 PatchMatch (SIGGRAPH'09)：這是傳統的強大演算法，但對微小點不適用。
-       * (3 mins) 講 Telea FMM (2004)：這是最適合微小破洞的數學解法，成本更低，恰好合適此處的修補目的。
-3. 我們的 Plan (3 mins)：
-	帶出要實作的系統架構。
-	解釋如何用傳統 CV（Laplacian 梯度、CCA連通域）自動精準抓出遮罩，然後交給Telea FMM進行「毫秒級、零顯存」的修補
