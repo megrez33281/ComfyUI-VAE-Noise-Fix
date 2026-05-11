@@ -391,4 +391,43 @@ class VAENoiseInpainterNode:
         max_noise_size: int,
     ) -> Tuple[torch.Tensor]:
         device = image.device
-        batch_size = image.shap
+        batch_size = image.shape[0]
+
+        # ComfyUI MASK is [B, H, W] or [H, W] float32.  Normalise to a
+        # 3-D [B, H, W] view so we can iterate uniformly.
+        if mask.dim() == 2:
+            mask = mask.unsqueeze(0)
+        # Broadcast mask batch if a single mask is fed to a batched image.
+        if mask.shape[0] == 1 and batch_size > 1:
+            mask = mask.expand(batch_size, -1, -1)
+
+        results: List[torch.Tensor] = []
+        for idx in range(batch_size):
+            bgr_u8 = TensorBridge.comfyui_to_cv2(image[idx])
+            mask_np = mask[idx].detach().cpu().numpy()
+            mask_u8 = (mask_np > 0.5).astype(np.uint8) * 255
+
+            if mask_u8.any():
+                out = TeleaInpainter.inpaint(bgr_u8, mask_u8, max_noise_size)
+            else:
+                out = bgr_u8
+            results.append(TensorBridge.cv2_to_comfyui(out, device))
+
+        return (torch.stack(results, dim=0),)
+
+
+# ---------------------------------------------------------------------------
+# ComfyUI registration
+# ---------------------------------------------------------------------------
+
+NODE_CLASS_MAPPINGS = {
+    "VAENoiseFix":       VAENoiseFixNode,
+    "VAENoiseDetector":  VAENoiseDetectorNode,
+    "VAENoiseInpainter": VAENoiseInpainterNode,
+}
+
+NODE_DISPLAY_NAME_MAPPINGS = {
+    "VAENoiseFix":       "VAE Noise Fix (Traditional CV)",
+    "VAENoiseDetector":  "VAE Noise Detector",
+    "VAENoiseInpainter": "VAE Noise Inpainter (Telea)",
+}
