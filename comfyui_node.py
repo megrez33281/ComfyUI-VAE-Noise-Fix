@@ -1,38 +1,63 @@
 """
 ComfyUI custom nodes — VAE high-frequency noise auto-detection & repair.
 
-Three nodes are registered:
+Three nodes are registered
+--------------------------
+* **VAENoiseFix** — all-in-one node: detection → repair in a single graph
+  node.  Drop-in backward-compatible with earlier workflows.  Use this
+  when no manual touch-up is needed.
 
-  * **VAENoiseFix** — the original all-in-one node: detection → repair in
-    a single graph node.  Drop-in backward-compatible with earlier
-    workflows.  Use this when no manual touch-up is needed.
+* **VAENoiseDetector** — detection only.  Outputs the preview view
+  selected by ``preview_mode`` plus a binary ``MASK``.  Use this when you
+  want to inspect or edit the mask before inpainting.  Also handy for
+  fanning the same image into multiple detectors with different
+  sensitivities and then OR-merging the masks.
 
-  * **VAENoiseDetector** — detection only.  Outputs the preview view
-    selected by ``preview_mode`` plus a binary ``MASK``.  Pair with
-    ComfyUI's built-in ``MaskEditor`` (right-click the MASK socket →
-    *Open in MaskEditor*) to manually add or erase regions before
-    inpainting.  Also handy for fanning the same image into multiple
-    detectors with different sensitivities, then OR-merging the masks.
+* **VAENoiseInpainter** — Telea inpainting only.  Takes an ``IMAGE``
+  plus a ``MASK`` (typically the edited output of the Detector) and
+  returns the repaired image.
 
-  * **VAENoiseInpainter** — Telea inpainting only.  Takes an ``IMAGE``
-    plus a ``MASK`` (typically the edited output of the Detector) and
-    returns the repaired image.
+Workflow A — fully automatic (no touch-up needed)
+--------------------------------------------------
+::
 
-Recommended advanced workflow::
+    [VAE Decode] ─► [VAENoiseFix] ─► repaired IMAGE + MASK
 
-    [VAE Decode] ─► [VAENoiseDetector]      ► (preview)
-                            │
-                            └─► MASK ─[MaskEditor]─► edited MASK
-                                                            │
-    [VAE Decode] ──────────────────────► [VAENoiseInpainter]
-                                                            │
-                                                            ▼
-                                                      repaired IMAGE
+Workflow B — manual mask editing with original image visible
+------------------------------------------------------------
+The native ComfyUI ``MaskEditor`` only shows a black/white canvas; the
+original image is not visible, making it hard to judge where to add or
+erase mask regions.
+
+**Recommended solution**: use **ComfyUI-Advanced-ControlNet** (or any
+package that provides a mask-editor node accepting a background IMAGE
+input) so the original image is rendered underneath the mask while you
+paint.
+
+::
+
+    [VAE Decode] ─► [VAENoiseDetector]
+                          ├─► IMAGE  ("Mask Overlay" preview mode)
+                          │         └─► [PreviewImage]  ← reference while editing
+                          │
+                          └─► MASK ─► [AdvancedControlNet / MaskEditor
+                                       with IMAGE background]
+                                              │
+                                              ▼  edited MASK
+                                    [VAENoiseInpainter] ◄─ [VAE Decode]
+                                              │
+                                              ▼
+                                        repaired IMAGE
+
+Tip: set ``preview_mode`` on ``VAENoiseDetector`` to ``"Mask Overlay"``
+so its IMAGE output is the original frame with red markers — route this
+into the mask-editor's background socket to see exactly which pixels are
+flagged while you paint.
 
 Adheres to SOLID — this file is pure ComfyUI binding; all algorithm
 logic lives in ``core/``.  Adding a new preview mode requires editing
 exactly one enum and one dispatch dict in ``core/pipeline.py``; the
-nodes are untouched (OCP).
+nodes here are untouched (OCP).
 """
 
 from __future__ import annotations
@@ -240,12 +265,20 @@ class VAENoiseDetectorNode:
     Outputs the chosen preview view + a binary MASK.  Skips the Telea
     inpaint step entirely (saves time), so this node is ideal when:
 
-      * The mask will be manually edited downstream (ComfyUI
-        ``MaskEditor``).
+      * The mask will be manually edited downstream.
       * Multiple detectors with different parameters are fanned in
         parallel and their masks combined.
       * You only want a detection preview without spending cycles on
         inpaint.
+
+    Recommended mask-editing workflow
+    ----------------------------------
+    Set ``preview_mode`` to ``"Mask Overlay"`` so the IMAGE output shows
+    the original frame with red noise markers.  Route that IMAGE into the
+    background-image socket of a mask-editor node (e.g. from
+    **ComfyUI-Advanced-ControlNet**) so you can see exactly which pixels
+    are flagged while you paint additional regions or erase false
+    positives.  Feed the edited MASK into ``VAENoiseInpainter``.
     """
 
     RETURN_TYPES = ("IMAGE", "MASK")
@@ -358,43 +391,4 @@ class VAENoiseInpainterNode:
         max_noise_size: int,
     ) -> Tuple[torch.Tensor]:
         device = image.device
-        batch_size = image.shape[0]
-
-        # ComfyUI MASK is [B, H, W] or [H, W] float32.  Normalise to a
-        # 3-D [B, H, W] view so we can iterate uniformly.
-        if mask.dim() == 2:
-            mask = mask.unsqueeze(0)
-        # Broadcast mask batch if a single mask is fed to a batched image.
-        if mask.shape[0] == 1 and batch_size > 1:
-            mask = mask.expand(batch_size, -1, -1)
-
-        results: List[torch.Tensor] = []
-        for idx in range(batch_size):
-            bgr_u8 = TensorBridge.comfyui_to_cv2(image[idx])
-            mask_np = mask[idx].detach().cpu().numpy()
-            mask_u8 = (mask_np > 0.5).astype(np.uint8) * 255
-
-            if mask_u8.any():
-                out = TeleaInpainter.inpaint(bgr_u8, mask_u8, max_noise_size)
-            else:
-                out = bgr_u8
-            results.append(TensorBridge.cv2_to_comfyui(out, device))
-
-        return (torch.stack(results, dim=0),)
-
-
-# ---------------------------------------------------------------------------
-# ComfyUI registration
-# ---------------------------------------------------------------------------
-
-NODE_CLASS_MAPPINGS = {
-    "VAENoiseFix":       VAENoiseFixNode,
-    "VAENoiseDetector":  VAENoiseDetectorNode,
-    "VAENoiseInpainter": VAENoiseInpainterNode,
-}
-
-NODE_DISPLAY_NAME_MAPPINGS = {
-    "VAENoiseFix":       "VAE Noise Fix (Traditional CV)",
-    "VAENoiseDetector":  "VAE Noise Detector",
-    "VAENoiseInpainter": "VAE Noise Inpainter (Telea)",
-}
+        batch_size = image.shap
