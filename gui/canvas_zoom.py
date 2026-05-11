@@ -34,6 +34,11 @@ class CanvasZoom:
     def is_zoomed(self) -> bool:
         return self._zoom > 1.01
 
+    @property
+    def center(self) -> tuple[float, float]:
+        """Current pan centre in normalised image coords ``(cx, cy) ∈ [0, 1]``."""
+        return self._cx, self._cy
+
     # -- Mutators ------------------------------------------------------------
 
     def reset(self) -> None:
