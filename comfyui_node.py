@@ -417,17 +417,115 @@ class VAENoiseInpainterNode:
 
 
 # ---------------------------------------------------------------------------
+# Interactive Mask Editor node
+# ---------------------------------------------------------------------------
+
+# Import the server module to register API routes and access the store.
+try:
+    from .mask_editor_server import store_editor_data, get_edited_mask
+except ImportError:
+    from mask_editor_server import store_editor_data, get_edited_mask
+
+
+class VAENoiseMaskEditorNode:
+    """Interactive mask editor for manual touch-up of auto-detected masks.
+
+    Workflow
+    --------
+    1. Connect ``VAENoiseDetector`` outputs (IMAGE + MASK) to this node.
+    2. **Queue Prompt** — the node stages the image and mask for the
+       frontend editor and passes them through unchanged.
+    3. Click the **"✏️ Edit Mask"** button on the node to open the popup
+       editor.  Paint / erase mask regions as needed.
+    4. **Queue Prompt** again — this time the node outputs the
+       user-edited mask.
+    5. Connect the outputs to ``VAENoiseInpainter``.
+    """
+
+    RETURN_TYPES = ("IMAGE", "MASK")
+    RETURN_NAMES = ("image", "mask")
+    FUNCTION = "execute"
+    CATEGORY = "image/postprocessing"
+
+    @classmethod
+    def INPUT_TYPES(cls) -> dict:
+        return {
+            "required": {
+                "image": ("IMAGE",),
+                "mask":  ("MASK",),
+            },
+            # ``UNIQUE_ID`` is the official ComfyUI mechanism for receiving
+            # the runtime node ID — auto-injected by the executor, no
+            # widget-side wiring required.
+            "hidden": {
+                "node_id": "UNIQUE_ID",
+            },
+        }
+
+    @classmethod
+    def IS_CHANGED(cls, **kwargs) -> float:
+        # Always re-execute so we pick up newly edited masks.
+        return float("nan")
+
+    def execute(
+        self,
+        image: torch.Tensor,
+        mask: torch.Tensor,
+        node_id: str = "",
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        device = image.device
+        batch_size = image.shape[0]
+
+        # Normalise mask to 3-D [B, H, W]
+        if mask.dim() == 2:
+            mask = mask.unsqueeze(0)
+
+        # ComfyUI may pass node_id as int; coerce to str for dict keys.
+        node_id = str(node_id) if node_id is not None else ""
+
+        # --- Check for user-edited mask ---
+        edited_np = get_edited_mask(node_id) if node_id else None
+
+        if edited_np is not None:
+            # Same hand-painted mask broadcast across the batch.
+            m = torch.from_numpy(
+                (edited_np > 127).astype(np.float32)
+            ).to(device)
+            out_mask = m.unsqueeze(0).expand(batch_size, -1, -1).contiguous()
+            return (image, out_mask)
+
+        # --- No edit yet: stage the first frame for the frontend editor ---
+        if node_id:
+            frame = image[0]                       # [H, W, C] float32 RGB
+            rgb_u8 = np.clip(
+                frame.detach().cpu().numpy() * 255.0, 0, 255
+            ).astype(np.uint8)
+
+            mask_frame = mask[0]                   # [H, W] float32
+            mask_u8 = (
+                mask_frame.detach().cpu().numpy() > 0.5
+            ).astype(np.uint8) * 255
+
+            store_editor_data(node_id, rgb_u8, mask_u8)
+
+        # Pass through original data
+        return (image, mask)
+
+
+# ---------------------------------------------------------------------------
 # ComfyUI registration
 # ---------------------------------------------------------------------------
 
 NODE_CLASS_MAPPINGS = {
-    "VAENoiseFix":       VAENoiseFixNode,
-    "VAENoiseDetector":  VAENoiseDetectorNode,
-    "VAENoiseInpainter": VAENoiseInpainterNode,
+    "VAENoiseFix":        VAENoiseFixNode,
+    "VAENoiseDetector":   VAENoiseDetectorNode,
+    "VAENoiseInpainter":  VAENoiseInpainterNode,
+    "VAENoiseMaskEditor": VAENoiseMaskEditorNode,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "VAENoiseFix":       "VAE Noise Fix (Traditional CV)",
-    "VAENoiseDetector":  "VAE Noise Detector",
-    "VAENoiseInpainter": "VAE Noise Inpainter (Telea)",
+    "VAENoiseFix":        "VAE Noise Fix (Traditional CV)",
+    "VAENoiseDetector":   "VAE Noise Detector",
+    "VAENoiseInpainter":  "VAE Noise Inpainter (Telea)",
+    "VAENoiseMaskEditor": "VAE Noise Mask Editor ✏️",
 }
