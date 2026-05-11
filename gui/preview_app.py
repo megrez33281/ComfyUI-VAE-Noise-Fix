@@ -19,8 +19,10 @@ import cv2
 import numpy as np
 
 from core import NoiseFixPipeline, PreviewMode
+from core.overlay import DebugOverlayRenderer
 from core.pipeline import DetectionResult
 
+from .brush_editor import BrushEditor
 from .canvas_zoom import CanvasZoom
 from .image_io import imread_safe, imwrite_safe
 from .statistics_hud import StatisticsHUD
@@ -78,8 +80,11 @@ class PreviewApp:
         self._view_mode_idx = 1  # MASK_OVERLAY by default
         self._zoom_lens = ZoomLens()
         self._canvas_zoom = CanvasZoom()
+        self._brush = BrushEditor()
         self._mouse_x = 0
         self._mouse_y = 0
+        self._cursor_canvas_x = 0
+        self._cursor_canvas_y = 0
 
         # Cached pipeline result.
         self._bgr: Optional[np.ndarray] = None
@@ -134,6 +139,18 @@ class PreviewApp:
                 self._switch_image(1)
             elif key == ord("r"):
                 self._canvas_zoom.reset()
+            elif key == ord("e"):
+                # Toggle brush edit mode; force Mask Overlay view when ON.
+                self._brush.toggle()
+                if self._brush.enabled:
+                    self._view_mode_idx = _VIEW_MODES.index(PreviewMode.MASK_OVERLAY)
+            elif key == ord("["):
+                self._brush.adjust_radius(-2)
+            elif key == ord("]"):
+                self._brush.adjust_radius(+2)
+            elif key == ord("c"):
+                # Wipe all brush edits (back to algorithm-only mask).
+                self._brush.clear()
 
         cv2.destroyAllWindows()
 
@@ -162,7 +179,34 @@ class PreviewApp:
         self._mouse_x = x
         self._mouse_y = y
         cx, cy = self._window_to_canvas(x, y)
+        self._cursor_canvas_x = cx
+        self._cursor_canvas_y = cy
 
+        # ---- Brush edit interception (must come first so paint works
+        #      regardless of zoom-lens / scroll bindings) ----------------
+        if self._brush.enabled:
+            img_xy = self._canvas_to_image(cx, cy)
+            if event == cv2.EVENT_LBUTTONDOWN:
+                self._brush.begin_stroke()
+                if img_xy is not None:
+                    self._brush.stroke(*img_xy, mode="add")
+            elif event == cv2.EVENT_RBUTTONDOWN:
+                self._brush.begin_stroke()
+                if img_xy is not None:
+                    self._brush.stroke(*img_xy, mode="erase")
+            elif event == cv2.EVENT_MOUSEMOVE:
+                if flags & cv2.EVENT_FLAG_LBUTTON and img_xy is not None:
+                    self._brush.stroke(*img_xy, mode="add")
+                elif flags & cv2.EVENT_FLAG_RBUTTON and img_xy is not None:
+                    self._brush.stroke(*img_xy, mode="erase")
+            elif event in (cv2.EVENT_LBUTTONUP, cv2.EVENT_RBUTTONUP):
+                self._brush.end_stroke()
+            # Scroll still adjusts brush radius in edit mode.
+            elif event == cv2.EVENT_MOUSEWHEEL:
+                self._brush.adjust_radius(+2 if flags > 0 else -2)
+            return
+
+        # ---- Non-edit-mode behaviour (unchanged) -----------------------
         if event == cv2.EVENT_MOUSEMOVE:
             self._zoom_lens.update_position(cx, cy)
 
@@ -189,6 +233,33 @@ class PreviewApp:
                 delta = 1 if flags > 0 else -1
                 self._zoom_lens.adjust_magnification(delta)
 
+    # -- Canvas ↔ source-image coord conversion --------------------------
+
+    def _canvas_to_image(self, cx: int, cy: int) -> Optional[Tuple[int, int]]:
+        """Map a canvas-space pixel (post canvas-zoom) back to source-image space.
+
+        Returns ``None`` if the source image isn't loaded or the point
+        lies outside the image bounds.
+        """
+        if self._bgr is None:
+            return None
+        h, w = self._bgr.shape[:2]
+        zoom = self._canvas_zoom.zoom
+        if zoom <= 1.01:
+            ix, iy = cx, cy
+        else:
+            vis_w = w / zoom
+            vis_h = h / zoom
+            # Mirror the crop maths in CanvasZoom.apply.
+            ncx, ncy = self._canvas_zoom.center
+            x0 = max(0, min(int(ncx * w - vis_w / 2), w - int(vis_w)))
+            y0 = max(0, min(int(ncy * h - vis_h / 2), h - int(vis_h)))
+            ix = x0 + int(cx / zoom)
+            iy = y0 + int(cy / zoom)
+        if 0 <= ix < w and 0 <= iy < h:
+            return ix, iy
+        return None
+
     # -- Image loading -------------------------------------------------------
 
     def _load_current_image(self) -> None:
@@ -199,6 +270,9 @@ class PreviewApp:
             return
         self._bgr = bgr
         self._canvas_zoom.reset()
+        # Resize brush delta buffers to match new image; clears edits when
+        # the dimensions actually change (and preserves them when they don't).
+        self._brush.attach_to(bgr.shape[:2])
         self._dirty = True
 
     def _switch_image(self, delta: int) -> None:
@@ -227,18 +301,42 @@ class PreviewApp:
         if self._bgr is None or self._result is None:
             return np.zeros((400, 600, 3), dtype=np.uint8)
 
-        mode = _VIEW_MODES[self._view_mode_idx]
-        canvas = self._result.select_view(mode).copy()
+        # Compute the effective mask: algorithm output + brush deltas.
+        # When the user has edits the overlay/mask-solo views must be
+        # re-rendered live so the changes are visible.
+        algo_mask = self._result.final_mask
+        effective_mask = (
+            self._brush.apply(algo_mask) if self._brush.has_edits() else algo_mask
+        )
 
-        # Canvas zoom.
+        # In edit mode we force the Mask Overlay view — that's the only
+        # view where painting is meaningful.  Re-render it live against
+        # the effective mask so brush strokes appear immediately.
+        if self._brush.enabled:
+            canvas = DebugOverlayRenderer.render(self._bgr, effective_mask)
+        else:
+            mode = _VIEW_MODES[self._view_mode_idx]
+            if self._brush.has_edits() and mode == PreviewMode.MASK_OVERLAY:
+                # User toggled brush off but kept edits — keep showing them.
+                canvas = DebugOverlayRenderer.render(self._bgr, effective_mask)
+            else:
+                canvas = self._result.select_view(mode).copy()
+
+        # Canvas zoom (crop + scale).
         canvas = self._canvas_zoom.apply(canvas)
 
         # HUD overlays.
         self._draw_top_bar(canvas)
         canvas = StatisticsHUD.draw(canvas, self._result.stats, self._canvas_zoom.zoom)
 
-        # Cache for "save current view" before adding the lens overlay.
+        # Cache for "save current view" before adding the lens / cursor.
         self._last_canvas = canvas.copy()
+
+        # Brush cursor outline tracks the mouse in edit mode.
+        if self._brush.enabled:
+            canvas = self._brush.draw_cursor(
+                canvas, self._cursor_canvas_x, self._cursor_canvas_y
+            )
 
         canvas = self._zoom_lens.render(canvas)
         return self._fit_to_window(canvas)
@@ -292,6 +390,12 @@ class PreviewApp:
         cv2.putText(canvas, param_text, (10, 76), font, 0.45, (180, 180, 180), 1, cv2.LINE_AA)
 
         right_lines: List[str] = []
+        if self._brush.enabled:
+            right_lines.append(
+                f"[E] BRUSH EDIT  r={self._brush.radius}  L=add  R=erase"
+            )
+        elif self._brush.has_edits():
+            right_lines.append("[E] Brush edits applied (overlay view)")
         if self._zoom_lens.enabled:
             right_lines.append("[Z] Zoom Lens ON")
         if self._canvas_zoom.is_zoomed:
@@ -299,11 +403,11 @@ class PreviewApp:
 
         for i, line in enumerate(right_lines):
             ty = 26 + i * 24
-            cv2.putText(canvas, line, (w - 300, ty), font, 0.5, (0, 0, 0), 3, cv2.LINE_AA)
-            cv2.putText(canvas, line, (w - 300, ty), font, 0.5, (0, 255, 200), 1, cv2.LINE_AA)
+            cv2.putText(canvas, line, (w - 360, ty), font, 0.5, (0, 0, 0), 3, cv2.LINE_AA)
+            cv2.putText(canvas, line, (w - 360, ty), font, 0.5, (0, 255, 200), 1, cv2.LINE_AA)
 
-        hints = ("1-5: View | 6-0,-: Debug | Ctrl+Scroll: Zoom | "
-                 "Z: Lens | S: Save | A/D: Nav | R: Reset | Q: Quit")
+        hints = ("1-5: View | 6-0,-: Debug | E: Brush | [/]: Size | C: Clear edits | "
+                 "Ctrl+Scroll: Zoom | Z: Lens | S: Save | A/D: Nav | R: Reset | Q: Quit")
         tw = cv2.getTextSize(hints, font, 0.4, 1)[0][0]
         cv2.putText(canvas, hints, (w - tw - 10, h - 12), font, 0.4, (0, 0, 0), 2, cv2.LINE_AA)
         cv2.putText(canvas, hints, (w - tw - 10, h - 12), font, 0.4, (160, 160, 160), 1, cv2.LINE_AA)
@@ -315,14 +419,30 @@ class PreviewApp:
             return
         src_path = self._paths[self._idx]
         base, ext = os.path.splitext(src_path)
-        suffix = (_SAVE_SUFFIXES[self._view_mode_idx]
-                  if self._view_mode_idx < len(_SAVE_SUFFIXES)
-                  else "_view")
-        out_path = f"{base}{suffix}{ext}"
-        if imwrite_safe(out_path, self._last_canvas):
-            print(f"Saved: {out_path}")
+
+        # The view suffix reflects whether brush edits are baked in.
+        if self._brush.enabled or self._brush.has_edits():
+            view_suffix = "_mask_edited_overlay"
         else:
-            print(f"Failed to save: {out_path}")
+            view_suffix = (_SAVE_SUFFIXES[self._view_mode_idx]
+                           if self._view_mode_idx < len(_SAVE_SUFFIXES)
+                           else "_view")
+        view_path = f"{base}{view_suffix}{ext}"
+        if imwrite_safe(view_path, self._last_canvas):
+            print(f"Saved view: {view_path}")
+        else:
+            print(f"Failed to save view: {view_path}")
+
+        # When brush edits exist, additionally dump the raw binary mask
+        # so it can be fed back into a downstream pipeline (e.g. ComfyUI
+        # LoadMask + VAENoiseInpainter).
+        if self._brush.has_edits() and self._result is not None:
+            effective_mask = self._brush.apply(self._result.final_mask)
+            mask_path = f"{base}_mask_edited.png"
+            if imwrite_safe(mask_path, effective_mask):
+                print(f"Saved edited binary mask: {mask_path}")
+            else:
+                print(f"Failed to save mask: {mask_path}")
 
 
 # ---------------------------------------------------------------------------

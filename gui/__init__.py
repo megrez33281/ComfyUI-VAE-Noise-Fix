@@ -13,6 +13,7 @@ from .image_io import imread_safe, imwrite_safe
 from .zoom_lens import ZoomLens
 from .canvas_zoom import CanvasZoom
 from .statistics_hud import StatisticsHUD
+from .brush_editor import BrushEditor
 from .preview_app import PreviewApp, collect_image_paths, open_file_dialog
 
 __all__ = [
@@ -21,6 +22,7 @@ __all__ = [
     "ZoomLens",
     "CanvasZoom",
     "StatisticsHUD",
+    "BrushEditor",
     "PreviewApp",
     "collect_image_paths",
     "open_file_dialog",
