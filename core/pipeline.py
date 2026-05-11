@@ -145,8 +145,21 @@ class NoiseFixPipeline:
 
     # -- Public API ----------------------------------------------------------
 
-    def run(self, bgr_u8: np.ndarray) -> DetectionResult:
-        """Execute detection + inpainting + view rendering."""
+    def run(
+        self,
+        bgr_u8: np.ndarray,
+        skip_inpaint: bool = False,
+    ) -> DetectionResult:
+        """Execute detection + inpainting + view rendering.
+
+        Args:
+            bgr_u8:       Source image, OpenCV BGR uint8.
+            skip_inpaint: If True, skip the Telea call entirely;
+                          ``repaired_bgr`` and ``side_by_side`` will hold
+                          copies of the original.  Used by the standalone
+                          Detector node where inpainting happens downstream
+                          (potentially after manual mask editing).
+        """
         h, w = bgr_u8.shape[:2]
 
         detector = GradientNoiseDetector(
@@ -161,13 +174,13 @@ class NoiseFixPipeline:
         maps: IntermediateMaps = detector.detect_with_intermediates(bgr_u8)
         elapsed_ms = (time.perf_counter() - t0) * 1000.0
 
-        # Inpaint (skip if mask is empty — saves a Telea call on clean frames).
-        if np.any(maps.final_mask):
+        # Inpaint (skip if requested, or if mask is empty).
+        if skip_inpaint or not np.any(maps.final_mask):
+            repaired = bgr_u8.copy()
+        else:
             repaired = TeleaInpainter.inpaint(
                 bgr_u8, maps.final_mask, self._max_noise_size
             )
-        else:
-            repaired = bgr_u8.copy()
 
         # Rendered views.
         overlay = DebugOverlayRenderer.render(bgr_u8, maps.final_mask)
@@ -199,10 +212,14 @@ class NoiseFixPipeline:
         self,
         bgr_u8: np.ndarray,
         mode: PreviewMode,
+        skip_inpaint: bool = False,
     ) -> tuple[np.ndarray, np.ndarray, DetectionStats]:
         """Run the pipeline and return ``(view_bgr, final_mask, stats)``.
 
         Convenience for single-view consumers like the ComfyUI node.
+        ``skip_inpaint=True`` avoids the Telea call when the requested
+        view is detection-only (e.g. ``MASK_OVERLAY``, ``MASK_SOLO`` or
+        any intermediate stage map).
         """
-        result = self.run(bgr_u8)
+        result = self.run(bgr_u8, skip_inpaint=skip_inpaint)
         return result.select_view(mode), result.final_mask, result.stats

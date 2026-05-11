@@ -36,6 +36,8 @@ try:
     )
     from .comfyui_node import (
         VAENoiseFixNode,
+        VAENoiseDetectorNode,
+        VAENoiseInpainterNode,
         NODE_CLASS_MAPPINGS,
         NODE_DISPLAY_NAME_MAPPINGS,
     )
@@ -54,6 +56,8 @@ except ImportError:
     )
     from comfyui_node import (
         VAENoiseFixNode,
+        VAENoiseDetectorNode,
+        VAENoiseInpainterNode,
         NODE_CLASS_MAPPINGS,
         NODE_DISPLAY_NAME_MAPPINGS,
     )
@@ -65,6 +69,9 @@ __all__ = [
     "TeleaInpainter",
     "DebugOverlayRenderer",
     "VAENoiseFixNode",
+    # New nodes (Detector / Inpainter split)
+    "VAENoiseDetectorNode",
+    "VAENoiseInpainterNode",
     # New public API (forwarded for convenience)
     "MaskSoloRenderer",
     "SideBySideRenderer",
