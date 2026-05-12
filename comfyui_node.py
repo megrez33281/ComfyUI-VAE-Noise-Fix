@@ -527,5 +527,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "VAENoiseFix":        "VAE Noise Fix (Traditional CV)",
     "VAENoiseDetector":   "VAE Noise Detector",
     "VAENoiseInpainter":  "VAE Noise Inpainter (Telea)",
-    "VAENoiseMaskEditor": "VAE Noise Mask Editor ✏️",
+    "VAENoiseMaskEditor": "VAE Noise Mask Editor",
 }
