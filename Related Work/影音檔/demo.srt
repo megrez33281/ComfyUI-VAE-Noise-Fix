@@ -1,0 +1,850 @@
+1
+00:00:02,133 --> 00:00:08,233
+My topic is fixing Stable Diffusion
+VAE's spurious bright pixels
+
+2
+00:00:08,633 --> 00:00:11,833
+The core idea of this project is very simple
+
+3
+00:00:11,833 --> 00:00:14,700
+To solve the tiny imperfections
+
+4
+00:00:14,700 --> 00:00:16,900
+known as spurious bright pixels
+
+5
+00:00:16,900 --> 00:00:21,933
+caused by VAEs when generating images using Stable Diffusion
+
+6
+00:00:24,366 --> 00:00:27,666
+What are VAE's spurious bright pixels?
+
+7
+00:00:29,666 --> 00:00:32,866
+When we generate images from Stable Diffusion
+
+8
+00:00:32,866 --> 00:00:36,433
+we need VAE decoder to reconstruct
+
+9
+00:00:36,433 --> 00:00:40,933
+the normal image from the latent image
+
+10
+00:00:42,200 --> 00:00:45,333
+Because diffusion models generate
+
+11
+00:00:45,333 --> 00:00:49,333
+latent images in a highly compressed dimension
+
+12
+00:00:50,566 --> 00:00:52,833
+Lots of high-frequency detail
+
+13
+00:00:52,966 --> 00:00:56,133
+can only be reconstructed
+
+14
+00:00:56,133 --> 00:01:01,333
+by the distribution learned from the training data
+
+15
+00:01:02,666 --> 00:01:07,766
+CFG is a parameter to control
+how much the model
+
+16
+00:01:07,800 --> 00:01:10,200
+follows the text prompt
+
+17
+00:01:11,166 --> 00:01:13,066
+The higher the CFG
+
+18
+00:01:13,066 --> 00:01:18,700
+the more the model influences
+
+19
+00:01:18,700 --> 00:01:24,633
+the generation direction from the text prompt
+
+20
+00:01:25,600 --> 00:01:27,500
+However the text prompt
+
+21
+00:01:27,500 --> 00:01:31,600
+can only offer limited semantic information
+
+22
+00:01:32,233 --> 00:01:37,200
+it lacks lots of detail or features
+from the real image
+
+23
+00:01:39,166 --> 00:01:41,733
+When CFG is too high
+
+24
+00:01:42,266 --> 00:01:45,400
+the latent may be pulled
+out of the distribution
+
+25
+00:01:45,433 --> 00:01:49,566
+trained from the training data
+
+26
+00:01:51,733 --> 00:01:55,200
+When the VAE decoder receives this
+
+27
+00:01:55,200 --> 00:01:58,666
+out of distribution extreme latent values
+
+28
+00:01:59,633 --> 00:02:03,600
+it cannot reconstruct the normal image stably
+
+29
+00:02:04,333 --> 00:02:08,000
+and then conduct local output saturation
+
+30
+00:02:08,000 --> 00:02:10,766
+or abnormal highlight values
+
+31
+00:02:11,866 --> 00:02:13,200
+In the final image
+
+32
+00:02:13,200 --> 00:02:16,000
+these abnormal values
+
+33
+00:02:16,033 --> 00:02:22,100
+will appear as a few bright spots
+
+34
+00:02:22,233 --> 00:02:26,033
+or pixels that are off-color pixels
+
+35
+00:02:27,566 --> 00:02:31,600
+known as spurious bright pixels or impulse noise
+
+36
+00:02:31,966 --> 00:02:34,300
+These artifacts not only appear in
+
+37
+00:02:34,333 --> 00:02:38,166
+dark or high contrast
+
+38
+00:02:38,200 --> 00:02:41,266
+or high contrast areas
+
+39
+00:02:43,000 --> 00:02:46,633
+but usually are observed in these areas
+
+40
+00:02:46,633 --> 00:02:49,633
+due to high bright contrast
+
+41
+00:02:51,300 --> 00:02:54,666
+Because these artifacts usually
+come from
+
+42
+00:02:54,700 --> 00:02:57,600
+a few abnormal latents
+
+43
+00:02:58,400 --> 00:03:02,300
+it usually has only 1 to 5 pixel size
+
+44
+00:03:02,333 --> 00:03:03,866
+in a 1k image
+
+45
+00:03:04,766 --> 00:03:07,766
+Next I will introduce three related solutions
+
+46
+00:03:08,800 --> 00:03:11,800
+Repaint represents diffusion model patching
+
+47
+00:03:12,466 --> 00:03:16,733
+PatchMatch represents block texture synthesis
+
+48
+00:03:16,733 --> 00:03:21,266
+and the Telea FMM represents boundary diffusion
+
+49
+00:03:22,466 --> 00:03:24,833
+The first method is Repaint
+
+50
+00:03:25,166 --> 00:03:27,966
+Its core mechanism is to use a mask
+
+51
+00:03:27,966 --> 00:03:31,000
+to divide the image to be repaired
+
+52
+00:03:31,033 --> 00:03:33,800
+into known regions and unknown regions
+
+53
+00:03:34,766 --> 00:03:36,733
+During the denoising process
+
+54
+00:03:36,733 --> 00:03:38,366
+for known regions
+
+55
+00:03:38,400 --> 00:03:44,366
+the original image is directly supplemented
+with noise at the corresponding time step
+
+56
+00:03:45,000 --> 00:03:47,700
+Unknown regions undergo normal denoising
+
+57
+00:03:48,633 --> 00:03:53,366
+The two are stitched together
+after this denoising step
+
+58
+00:03:54,266 --> 00:03:56,633
+To ensure a natural stitch
+
+59
+00:03:56,666 --> 00:04:01,133
+the image is resampled to the previous step
+
+60
+00:04:01,133 --> 00:04:03,900
+and denoised again after stitching
+
+61
+00:04:04,633 --> 00:04:05,500
+Furthermore
+
+62
+00:04:05,533 --> 00:04:08,233
+to allow the model to more effectively
+
+63
+00:04:08,233 --> 00:04:12,633
+integrate semantic information
+through the denoising process
+
+64
+00:04:13,200 --> 00:04:16,666
+Repaint introduces the concept of jump lengths
+
+65
+00:04:17,466 --> 00:04:24,000
+By repeatedly performing forward and reverse
+operations across multiple time steps
+
+66
+00:04:25,033 --> 00:04:30,800
+it improves the harmony and semantic
+plausibility of the final image
+
+67
+00:04:31,500 --> 00:04:33,833
+While this is a powerful method
+
+68
+00:04:34,333 --> 00:04:37,700
+I believe it is not suitable for the
+current situation
+
+69
+00:04:39,066 --> 00:04:43,266
+Running 250 to 1000 diffusion steps
+
+70
+00:04:43,300 --> 00:04:46,066
+for a 1 to 5 pixel defect
+
+71
+00:04:46,900 --> 00:04:50,533
+requiring 8 to 12 GB of GPU memory
+
+72
+00:04:50,533 --> 00:04:59,333
+and with latency in the seconds
+to minutes range is not worthwhile
+
+73
+00:05:00,266 --> 00:05:04,133
+The second method we will be looking at
+today is PatchMatch
+
+74
+00:05:05,366 --> 00:05:06,266
+To begin
+
+75
+00:05:06,300 --> 00:05:09,733
+the algorithm covers the target area
+
+76
+00:05:09,766 --> 00:05:12,066
+the region we want to inpaint
+
+77
+00:05:12,066 --> 00:05:14,933
+using a sliding window to extract patches
+
+78
+00:05:14,966 --> 00:05:17,766
+of a specified size
+
+79
+00:05:18,866 --> 00:05:20,000
+Initially
+
+80
+00:05:20,000 --> 00:05:23,633
+these patches are randomly paired with patches
+
+81
+00:05:23,633 --> 00:05:25,266
+of the exact same size
+
+82
+00:05:25,266 --> 00:05:27,666
+from the available source image
+
+83
+00:05:28,466 --> 00:05:33,333
+Next we enter the iterative
+optimization phase
+
+84
+00:05:33,366 --> 00:05:36,233
+which is the core of this algorithm
+
+85
+00:05:36,233 --> 00:05:39,766
+This phase consists of two alternating steps
+
+86
+00:05:41,266 --> 00:05:42,700
+First propagation
+
+87
+00:05:43,133 --> 00:05:47,600
+For every patch in the target area
+
+88
+00:05:47,700 --> 00:05:53,100
+the algorithm checks the matching
+results of its immediate neighbors
+
+89
+00:05:53,600 --> 00:05:57,566
+If a neighbor's offset provides a better match
+
+90
+00:05:57,566 --> 00:06:03,000
+meaning the source patch it points to
+is more similar
+
+91
+00:06:03,100 --> 00:06:07,700
+the current patch simply adopts
+or copies that neighbor's offset
+
+92
+00:06:09,133 --> 00:06:11,066
+Second random search
+
+93
+00:06:11,633 --> 00:06:17,000
+Taking the currently matched patch's
+location in the source image
+
+94
+00:06:17,200 --> 00:06:18,500
+as a center point
+
+95
+00:06:19,066 --> 00:06:24,233
+the algorithm performs random sampling
+within a specified radius
+
+96
+00:06:24,233 --> 00:06:27,266
+This search radius gradually shrinks
+
+97
+00:06:27,266 --> 00:06:33,166
+allowing the algorithm to fine-tune
+and find the best local optimum
+
+98
+00:06:35,700 --> 00:06:41,300
+These two steps propagation and random search
+are continuously repeated
+
+99
+00:06:42,000 --> 00:06:45,166
+The loop stops either when it reaches
+
+100
+00:06:45,166 --> 00:06:48,733
+a predefined maximum number of iterations
+
+101
+00:06:49,500 --> 00:06:54,466
+or when it fully converges meaning the
+matching results stop changing
+
+102
+00:06:58,800 --> 00:06:59,933
+Ultimately
+
+103
+00:06:59,966 --> 00:07:04,566
+this iterative process generates
+a complete look-up table
+
+104
+00:07:04,566 --> 00:07:08,133
+mapping every single patch in the target area
+
+105
+00:07:08,133 --> 00:07:11,533
+to its best matching patch in the source image
+
+106
+00:07:12,366 --> 00:07:15,200
+Now for the final reconstruction
+
+107
+00:07:15,200 --> 00:07:17,466
+Because the sliding window overlaps
+
+108
+00:07:17,466 --> 00:07:23,933
+each individual pixel in the target area
+will have multiple patches overlapping it
+
+109
+00:07:24,166 --> 00:07:26,033
+To resolve this
+
+110
+00:07:26,066 --> 00:07:28,933
+the algorithm uses a voting mechanism
+
+111
+00:07:28,933 --> 00:07:35,166
+It looks at the corresponding pixels from all
+the matched source patches and essentially votes
+
+112
+00:07:35,166 --> 00:07:38,666
+or averages them out to determine
+
+113
+00:07:38,666 --> 00:07:43,033
+the most appropriate final color for the
+specified pixel
+
+114
+00:07:45,133 --> 00:07:47,333
+To summarize its application
+
+115
+00:07:47,933 --> 00:07:52,766
+this method is incredibly well suited
+for large
+
+116
+00:07:52,866 --> 00:07:56,333
+scale object removal and complex
+texture reconstruction
+
+117
+00:07:56,866 --> 00:07:58,133
+Moreover
+
+118
+00:07:58,133 --> 00:08:03,766
+its speed is significantly faster compared
+to the previous method we discussed
+
+119
+00:08:05,233 --> 00:08:06,100
+However
+
+120
+00:08:06,100 --> 00:08:08,200
+as I mentioned earlier
+
+121
+00:08:08,200 --> 00:08:12,466
+PatchMatch is primarily designed for
+large-area inpainting
+
+122
+00:08:13,266 --> 00:08:16,200
+If we are only trying to fix minor
+
+123
+00:08:16,233 --> 00:08:18,733
+microscopic blemishes
+
+124
+00:08:19,100 --> 00:08:22,466
+running a full-image search using this method
+
+125
+00:08:22,900 --> 00:08:29,166
+is not only a waste of computational resources
+but it also risks
+
+126
+00:08:29,166 --> 00:08:34,700
+pulling in irrelevant textures from other
+parts of the image
+
+127
+00:08:36,733 --> 00:08:40,100
+The third method is the Telea FMM
+
+128
+00:08:40,833 --> 00:08:42,033
+First the algorithm
+
+129
+00:08:42,033 --> 00:08:49,133
+divides the image into three regions based
+on the mask provided by the user
+
+130
+00:08:49,133 --> 00:08:50,800
+The gray known region
+
+131
+00:08:51,166 --> 00:08:52,866
+the white unknown region
+
+132
+00:08:53,233 --> 00:08:56,900
+and the red boundary separating the two regions
+
+133
+00:08:58,166 --> 00:09:07,466
+Next the algorithm traces along the boundary
+to find the outermost ring of pixels inside the hole
+
+134
+00:09:08,433 --> 00:09:14,233
+This is called band 0 and it is the
+very first area to be inpainted
+
+135
+00:09:15,633 --> 00:09:17,433
+Starting from band 0
+
+136
+00:09:17,433 --> 00:09:22,266
+the algorithm traverses inward visiting each pixel
+
+137
+00:09:22,300 --> 00:09:25,966
+and recording its corresponding arrival time
+
+138
+00:09:27,000 --> 00:09:31,766
+This time serves as a reference for
+the inpainting sequence
+
+139
+00:09:32,433 --> 00:09:35,700
+After calculating the order of every pixel
+
+140
+00:09:36,133 --> 00:09:42,400
+the inpainting process begins from band 0
+which has the earliest arrival time
+
+141
+00:09:43,966 --> 00:09:44,933
+Theoretically
+
+142
+00:09:44,966 --> 00:09:47,833
+every time a pixel is inpainted
+
+143
+00:09:48,333 --> 00:09:50,466
+its neighbors' arrival times are updated
+
+144
+00:09:50,900 --> 00:09:56,400
+and the pixel with the next earliest
+arrival time is chosen for the next round
+
+145
+00:09:56,866 --> 00:10:00,233
+In actual implementation however
+
+146
+00:10:00,233 --> 00:10:02,933
+the algorithm first computes the arrival
+times for all pixels
+
+147
+00:10:02,966 --> 00:10:07,200
+and then carries out the inpainting sequentially
+
+148
+00:10:07,500 --> 00:10:10,866
+For a target point p to be inpainted
+
+149
+00:10:11,266 --> 00:10:19,233
+the algorithm looks at all known neighboring
+points q within a specified radius
+
+150
+00:10:19,233 --> 00:10:20,500
+For each neighbor q
+
+151
+00:10:20,533 --> 00:10:23,966
+it uses a first-order approximation
+
+152
+00:10:23,966 --> 00:10:27,966
+to estimate what color point p should be
+
+153
+00:10:28,266 --> 00:10:30,766
+as if extending from q to p
+
+154
+00:10:31,500 --> 00:10:34,766
+Then a weight is calculated based on
+three factors
+
+155
+00:10:35,300 --> 00:10:37,300
+the direction from q to p
+
+156
+00:10:37,333 --> 00:10:43,600
+the geometric distance and the level set
+corresponding to the arrival time
+
+157
+00:10:44,700 --> 00:10:50,800
+Once the color predictions and weights
+from all points q are calculated
+
+158
+00:10:51,166 --> 00:10:54,866
+they are combined using a weighted average
+
+159
+00:10:54,866 --> 00:10:58,066
+to get the final color to fill into point p
+
+160
+00:10:59,466 --> 00:11:03,133
+When all pixels are inpainted in this
+calculated order
+
+161
+00:11:03,766 --> 00:11:06,433
+we get the fully restored image
+
+162
+00:11:07,366 --> 00:11:11,666
+Because this algorithm doesn't search
+through the entire image
+
+163
+00:11:11,700 --> 00:11:18,233
+but instead only looks at the pixels
+near the hole and fills it in what using surrounding colors
+
+164
+00:11:18,733 --> 00:11:22,800
+it is very fast and highly suitable for
+filling small gaps
+
+165
+00:11:23,300 --> 00:11:27,833
+This makes it a perfect fit for the problem
+we are trying to solve right now
+
+166
+00:11:28,700 --> 00:11:31,733
+Next I would like to introduce my project
+
+167
+00:11:32,866 --> 00:11:36,433
+The system workflow is broken down
+into three main steps
+
+168
+00:11:37,566 --> 00:11:41,200
+First we identify candidate pixels using
+a combination
+
+169
+00:11:41,200 --> 00:11:44,900
+of the Laplace operator and median residual
+
+170
+00:11:45,700 --> 00:11:48,866
+utilizing brightness as our threshold
+
+171
+00:11:48,866 --> 00:11:52,633
+to eliminate false positives and obtain
+a highly precise mask
+
+172
+00:11:53,400 --> 00:11:59,933
+We then filter the results through connected
+component analysis and variance filtering
+
+173
+00:12:00,533 --> 00:12:01,233
+Second
+
+174
+00:12:01,233 --> 00:12:06,233
+the precise mask is passed to the
+Telea FMM method
+
+175
+00:12:06,233 --> 00:12:08,100
+for the actual image inpainting
+
+176
+00:12:08,366 --> 00:12:09,066
+Third
+
+177
+00:12:09,066 --> 00:12:13,633
+we provide a graphical user interface
+featuring a red mask preview
+
+178
+00:12:14,233 --> 00:12:17,433
+This allows for real-time parameter adjustments
+
+179
+00:12:17,433 --> 00:12:23,066
+and even gives users the ability to manually
+edit the mask themselves
+
+180
+00:12:23,533 --> 00:12:24,500
+However
+
+181
+00:12:24,533 --> 00:12:28,400
+developing this system comes with a few
+key challenges
+
+182
+00:12:28,400 --> 00:12:31,566
+The first challenge is legitimate
+
+183
+00:12:31,733 --> 00:12:34,000
+bright details and actual artifacts
+
+184
+00:12:34,033 --> 00:12:36,900
+can sometimes look nearly identical
+
+185
+00:12:36,900 --> 00:12:41,066
+making them extremely difficult to
+distinguish from one another
+
+186
+00:12:41,600 --> 00:12:43,300
+The second challenge is that
+
+187
+00:12:43,766 --> 00:12:48,500
+noise doesn't always manifest as a highly
+prominent bright spot
+
+188
+00:12:48,600 --> 00:12:53,366
+Sometimes it appears as subtle
+solid-color blobs
+
+189
+00:12:53,366 --> 00:12:58,266
+that just look like out of place compared
+to their surroundings
+
+190
+00:12:58,266 --> 00:13:03,100
+And the third challenge is thin, long natural structures
+
+191
+00:13:03,166 --> 00:13:06,900
+such as strands of hair or fine lines
+
+192
+00:13:06,900 --> 00:13:10,666
+possess extremely high local contrast
+and sharpness
+
+193
+00:13:11,266 --> 00:13:12,633
+Because of this
+
+194
+00:13:12,633 --> 00:13:15,733
+local gradient detection algorithms can easily
+
+195
+00:13:15,766 --> 00:13:21,466
+misidentify fragments of these sharp
+natural details as isolated noise
+
+196
+00:13:22,300 --> 00:13:24,166
+That concludes my presentation
+
+197
+00:13:24,566 --> 00:13:25,900
+Thank you for listening
+
