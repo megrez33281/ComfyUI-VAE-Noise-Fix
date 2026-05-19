@@ -64,6 +64,7 @@ from __future__ import annotations
 
 from typing import List, Tuple
 
+import cv2
 import numpy as np
 import torch
 
@@ -408,6 +409,13 @@ class VAENoiseInpainterNode:
             mask_u8 = (mask_np > 0.5).astype(np.uint8) * 255
 
             if mask_u8.any():
+                # Safety guard: resize mask if dimensions differ from image.
+                img_h, img_w = bgr_u8.shape[:2]
+                if mask_u8.shape != (img_h, img_w):
+                    mask_u8 = cv2.resize(
+                        mask_u8, (img_w, img_h),
+                        interpolation=cv2.INTER_NEAREST,
+                    )
                 out = TeleaInpainter.inpaint(bgr_u8, mask_u8, max_noise_size)
             else:
                 out = bgr_u8
@@ -487,7 +495,14 @@ class VAENoiseMaskEditorNode:
         edited_np = get_edited_mask(node_id) if node_id else None
 
         if edited_np is not None:
-            # Same hand-painted mask broadcast across the batch.
+            # Guard: if the image size changed since the mask was painted,
+            # resize the mask with nearest-neighbour to avoid cv2 crashes.
+            img_h, img_w = int(image.shape[1]), int(image.shape[2])
+            if edited_np.shape != (img_h, img_w):
+                edited_np = cv2.resize(
+                    edited_np, (img_w, img_h),
+                    interpolation=cv2.INTER_NEAREST,
+                )
             m = torch.from_numpy(
                 (edited_np > 127).astype(np.float32)
             ).to(device)

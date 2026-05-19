@@ -126,23 +126,24 @@ function refreshAllVaeNodes() {
     }
 }
 
-// ── Event listeners ──────────────────────────────────────────────────────────
-
-// Per-node: fires when a specific node finishes executing.
-api.addEventListener("executed", ({ detail }) => {
-    if (!detail?.node) return;
-    const node = findVaeNode(detail.node);
-    if (node) node._refreshMaskPreview?.();
-});
-
-// Full-prompt fallback: fires when the entire prompt finishes successfully.
-// Catches cases where the per-node "executed" event is missed.
-api.addEventListener("execution_success", () => {
-    refreshAllVaeNodes();
-});
-
 app.registerExtension({
     name: "VAENoiseFix.MaskEditor",
+
+    // setup() runs once after the full app is initialised — the correct place
+    // to attach api event listeners so we don't race against app boot.
+    setup() {
+        // Per-node: fires when a specific node finishes executing.
+        api.addEventListener("executed", ({ detail }) => {
+            if (!detail?.node) return;
+            const node = findVaeNode(detail.node);
+            if (node) node._refreshMaskPreview?.();
+        });
+
+        // Full-prompt fallback: fires when the entire prompt succeeds.
+        api.addEventListener("execution_success", () => {
+            refreshAllVaeNodes();
+        });
+    },
 
     async beforeRegisterNodeDef(nodeType, nodeData, _app) {
         if (nodeData.name !== NODE_NAME) return;
