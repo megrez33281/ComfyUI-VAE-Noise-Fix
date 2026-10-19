@@ -440,9 +440,7 @@ ComfyUI-VAE-Noise-Fix/
 │   ├── GroupC/                    #   銀河星空（邊界案例）
 │   └── GroupD/                    #   動漫風格肖像
 │
-├── 系統架構.txt                    # 原始系統架構設計文件
-├── Related Work/                  # 相關文獻 PDF
-└── 針對-SDXL-VAE-高頻噪點修復之傳統電腦視覺自動化節點開發評估報告.md
+└── workflow.json                  # 範例 ComfyUI 工作流
 ```
 
 ---
@@ -522,3 +520,4 @@ MIT
 ## Acknowledgements
 
 本專案為國立陽明交通大學「影像編修技術與特效合成」課程期末專題。
+課程繳交的簡報、報告與相關素材封存於 tag [`term-project-spring-2026`](https://github.com/megrez33281/ComfyUI-VAE-Noise-Fix/tree/term-project-spring-2026)。
