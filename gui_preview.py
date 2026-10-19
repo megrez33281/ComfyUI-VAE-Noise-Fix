@@ -10,8 +10,9 @@ Usage:
     python gui_preview.py path/to/image.png       # direct open
     python gui_preview.py path/to/folder/         # browse folder
 
-Controls:
-    Trackbars            gradient_sensitivity, max_noise_size, mask_dilate
+Requires tkinter and Pillow (``pip install Pillow``); PyTorch is not needed.
+
+Controls (sliders and buttons are in the right-hand panel):
     1                    Original image
     2                    Mask overlay (red)
     3                    Mask only (white on black, green circles)
@@ -23,6 +24,9 @@ Controls:
     9                    Context mask (low sensitivity)
     0                    Filtered candidates (post structural filter)
     -                    Final verified mask (post LAB; pre-dilation)
+    E                    Toggle brush edit mode (left-drag paint, right-drag erase)
+    [ / ]                Decrease / increase brush radius
+    C                    Clear all brush edits
     Ctrl + Scroll        Zoom canvas in/out at mouse position
     R                    Reset canvas zoom
     Z                    Toggle zoom lens on/off

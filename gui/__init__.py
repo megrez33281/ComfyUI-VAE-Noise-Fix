@@ -1,11 +1,12 @@
 """
-GUI sub-package for the standalone OpenCV HighGUI preview application.
+GUI sub-package for the standalone tkinter preview application.
 
 Modules:
     image_io     — Windows-safe image read/write helpers.
     zoom_lens    — Mouse-following magnification inset.
     canvas_zoom  — Whole-canvas zoom & pan state machine.
     statistics_hud — HUD overlay drawing for detection statistics.
+    brush_editor — Manual paint / erase edits on top of the detected mask.
     preview_app  — The interactive ``PreviewApp`` itself.
 """
 

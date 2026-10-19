@@ -7,8 +7,8 @@ VAENoiseFixNode, ...) from a single ``vae_noise_fix.py`` module.  The
 codebase has since been split into ``core/`` (algorithms) and
 ``comfyui_node.py`` (ComfyUI binding) following SOLID.
 
-To keep existing imports working — including the bundled
-``test_vae_noise_fix.py`` and any third-party scripts — this module
+To keep existing imports working — including third-party scripts
+written against the old layout — this module
 re-exports the public API under its previous names.
 
 New code SHOULD import from ``core`` directly, e.g.
