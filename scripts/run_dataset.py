@@ -1,26 +1,31 @@
 """
-Standalone validation script for VAENoiseFixNode.
+Batch-run VAENoiseFixNode over the bundled dataset for visual inspection.
 
 Loads dataset images, runs the detection + inpaint pipeline, and writes
-side-by-side comparison outputs to verify correctness without requiring
-a running ComfyUI instance.
+mask-overlay and repaired outputs to ``test_output/`` without requiring
+a running ComfyUI instance.  Automated assertions live in ``tests/``
+(run with ``pytest``); this script is for eyeballing results.
 
 Usage:
-    python test_vae_noise_fix.py
+    python scripts/run_dataset.py
 """
 
 from __future__ import annotations
 
 import glob
 import os
+import sys
 from pathlib import Path
 
 import cv2
 import numpy as np
 import torch
 
-from comfyui_node import VAENoiseFixNode
-from core import PreviewMode
+REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT))
+
+from comfyui_node import VAENoiseFixNode  # noqa: E402
+from core import PreviewMode  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -56,9 +61,8 @@ def _save_tensor(tensor: torch.Tensor, path: str) -> None:
 # ---------------------------------------------------------------------------
 
 def run_tests() -> None:
-    script_dir = Path(__file__).resolve().parent
-    dataset_dir = script_dir / "dataset"
-    output_dir = script_dir / "test_output"
+    dataset_dir = REPO_ROOT / "dataset"
+    output_dir = REPO_ROOT / "test_output"
     output_dir.mkdir(exist_ok=True)
 
     image_paths = sorted(glob.glob(str(dataset_dir / "**" / "*.png"), recursive=True))

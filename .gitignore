@@ -1,5 +1,6 @@
 # Python
 __pycache__/
+.pytest_cache/
 *.pyc
 *.pyo
 *.egg-info/
@@ -22,3 +23,6 @@ test_output/
 .env
 *.mp3
 *.mp4
+# Pipeline outputs saved next to dataset inputs (GUI "Save" / scripts)
+dataset/**/*_fixed.png
+dataset/**/*_repaired.png

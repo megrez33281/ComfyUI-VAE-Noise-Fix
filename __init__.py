@@ -11,17 +11,24 @@ Project layout:
     core/             - algorithm package (SOLID-modularised)
     comfyui_node.py   - ComfyUI binding
     mask_editor_server.py - API routes for the interactive mask editor
-    web/js/           - frontend JavaScript extensions
-    gui/              - standalone OpenCV preview application
+    web/js/           - frontend JavaScript extensions (mask editor popup)
+    gui/              - standalone tkinter preview / tuning application
     gui_preview.py    - GUI entry point
     vae_noise_fix.py  - backward-compat shim (legacy import path)
 
 Installation as a ComfyUI custom node:
-    Clone or symlink this directory into ``ComfyUI/custom_nodes/``.
-    Requires: opencv-python, numpy, torch (bundled with ComfyUI).
+    Install "VAE Noise Fix" from ComfyUI-Manager / the Comfy Registry, or
+    clone this directory into ``ComfyUI/custom_nodes/``.
+    Requires: opencv-python, numpy (torch and Pillow come with ComfyUI).
 """
 
-from .comfyui_node import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS
+# Dual-mode import: relative when ComfyUI loads this directory as a
+# package, absolute when this file is imported as a plain module (pytest
+# imports a test tree's parent ``__init__.py`` during collection).
+try:
+    from .comfyui_node import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS
+except ImportError:
+    from comfyui_node import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS
 
 # Expose the web/ directory so ComfyUI serves the JS frontend extension.
 WEB_DIRECTORY = "./web"
