@@ -1,0 +1,44 @@
+name: Publish to Comfy Registry
+
+# Publishes the version in pyproject.toml whenever it changes on main.
+# Setup (one time): fill in [tool.comfy] PublisherId in pyproject.toml and
+# add the registry API key as the repository secret REGISTRY_ACCESS_TOKEN.
+# Until both are set, this workflow skips instead of failing.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ["pyproject.toml"]
+
+permissions:
+  contents: read
+
+jobs:
+  publish-node:
+    name: Publish custom node to registry
+    runs-on: ubuntu-latest
+    if: github.repository == 'megrez33281/ComfyUI-VAE-Noise-Fix'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check registry configuration
+        id: config
+        env:
+          TOKEN: ${{ secrets.REGISTRY_ACCESS_TOKEN }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "::notice::REGISTRY_ACCESS_TOKEN secret is not set; skipping publish."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          elif grep -Eq '^PublisherId *= *""' pyproject.toml; then
+            echo "::notice::[tool.comfy] PublisherId is empty in pyproject.toml; skipping publish."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish custom node
+        if: steps.config.outputs.ready == 'true'
+        uses: Comfy-Org/publish-node-action@main
+        with:
+          personal_access_token: ${{ secrets.REGISTRY_ACCESS_TOKEN }}
+          skip_checkout: "true"

@@ -1,0 +1,11 @@
+# Files kept in git but left out of the Comfy Registry archive.
+# Syntax matches .gitignore; see README "Publishing".
+
+# Sample images (~54 MB) — only used by tests and the GUI demo.
+dataset/
+
+# Development-only
+tests/
+scripts/
+docs/
+.github/

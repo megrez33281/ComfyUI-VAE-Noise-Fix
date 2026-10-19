@@ -1,0 +1,25 @@
+[project]
+name = "vae-noise-fix"
+description = "Detect and repair SDXL VAE isolated bright-pixel artifacts (\"fireflies\") with classical computer vision: Laplacian + median residual, CCA shape filtering, LAB cliff check and Telea inpainting. No neural network or model download."
+version = "1.0.0"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+# torch and Pillow are provided by ComfyUI itself.
+dependencies = ["opencv-python", "numpy"]
+classifiers = [
+    "Operating System :: OS Independent",
+]
+
+[project.urls]
+Repository = "https://github.com/megrez33281/ComfyUI-VAE-Noise-Fix"
+Documentation = "https://github.com/megrez33281/ComfyUI-VAE-Noise-Fix#readme"
+"Bug Tracker" = "https://github.com/megrez33281/ComfyUI-VAE-Noise-Fix/issues"
+
+[tool.comfy]
+PublisherId = ""  # TODO: your publisher id from https://registry.comfy.org (see README "Publishing")
+DisplayName = "VAE Noise Fix"
+Icon = ""
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = [".", "tests"]
