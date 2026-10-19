@@ -8,13 +8,21 @@ minimum number of GPU↔CPU transfers and minimum number of buffer copies.
 
 Putting these adapters in a dedicated module satisfies SRP — none of the
 algorithmic modules need to know that the upstream caller is ComfyUI.
+
+``torch`` is imported lazily inside the tensor methods: the detector only
+needs ``grayscale_rec709`` from this module, so the standalone GUI and the
+``core`` package can run without PyTorch installed.
 """
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import cv2
 import numpy as np
-import torch
+
+if TYPE_CHECKING:
+    import torch
 
 
 class TensorBridge:
@@ -40,6 +48,8 @@ class TensorBridge:
     def cv2_to_comfyui(bgr_u8: np.ndarray, device: torch.device) -> torch.Tensor:
         """Convert an OpenCV BGR uint8 array back to a ComfyUI ``[H, W, 3]`` tensor."""
         rgb_u8: np.ndarray = cv2.cvtColor(bgr_u8, cv2.COLOR_BGR2RGB)
+        import torch
+
         rgb_f32: np.ndarray = rgb_u8.astype(np.float32) / 255.0
         return torch.from_numpy(rgb_f32).to(device)
 
@@ -53,6 +63,8 @@ class TensorBridge:
     @staticmethod
     def mask_u8_to_comfyui(mask_u8: np.ndarray, device: torch.device) -> torch.Tensor:
         """Convert a uint8 mask ``{0, 255}`` to a ComfyUI MASK tensor ``[H, W]`` float32."""
+        import torch
+
         return torch.from_numpy((mask_u8 > 0).astype(np.float32)).to(device)
 
     # -- Luminance utility ---------------------------------------------------
